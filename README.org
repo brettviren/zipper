@@ -1,0 +1,22 @@
+#+title: Zipper is streaming priority merge queue
+
+* Algorithms
+
+- ~merged_queue~ :: a priority queue accepting elements from \(k\)
+  ordered input streams to produce one ordered output stream.  The
+  association of an element with its stream is maintained through the
+  queue.  With it one may, for example, determine if the queue is
+  "complete" such that it is safe to ~pop()~ the ~top()~ and not spoil
+  subsequent ordering.
+
+- ~tardy_queue~ :: a layer on ~merged_queue~ which limits latency and
+  maintains ordering in the face of late arrival of input elements.
+  It does this by discarding elements which are "tardy" on input.
+
+  
+
+
+
+
+
+
