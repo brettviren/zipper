@@ -2,118 +2,258 @@
 #define ZIPPER_HPP
 
 #include <queue>
+#include <chrono>
 #include <unordered_map>
 
 namespace zipper {
 
     /**
-       A k-way merged queue. 
+       Prototype node for tracking elements in the zipper queue.
 
-       A "node" or "element" in the queue is a pair of values:
-       (priority, identity)
+       The "payload" is the user object to place in the queue.
 
-       The "priority" is any value that can be partially ordered (has
-       a "less than" operator or one can be provided as the "Compare"
-       template parameter).
+       The "ordering" is a value used to order the the nodes.
 
-       The "identity" is any value that can be hashed and is used
-       define a "stream".  That is, all "priority" objects with a
-       common "identity" are so grouped.
+       The "identity" is a value that can be hashed and is used define
+       a "stream".  That is, all "payload" objects with a common
+       "identity" are so grouped.
 
+       The "debut" is the time point which the node entered the queue.
     */
-    template <typename Node,
-              typename Sequence = std::vector<Node>,
-              typename Compare = std::less<Node> >
-    class merged_queue  {
+    template <typename Payload,
+              typename Ordering = size_t,
+              typename Identity = size_t,
+              typename TimePoint = std::chrono::steady_clock::time_point>
+    struct Node {
+        using payload_t = Payload;
+        using ordering_t = Ordering;
+        using identity_t = Identity;
+        using timepoint_t = TimePoint;
+
+        payload_t payload;
+        ordering_t ordering;
+        identity_t identity;
+        timepoint_t debut;
+
+        // Partial order.  
+        bool operator<(const Node& rhs) const {
+            return ordering < rhs.ordering;
+        }
+        bool operator>(const Node& rhs) const {
+            return ordering > rhs.ordering;
+        }
+    };
+
+    /**
+       A k-way merge with ordering and optional latency guarantees.
+
+       See @ref Node above for example of Node type.
+
+       Note, the priority is in ASCENDING orderering, the queue inside
+       merge is a min-heap.  If the reverse is true, you must provide
+       a Node type with a "backwards" less-than operator.
+    */
+    template <typename Node>
+    class merge
+        : public std::priority_queue<Node,
+                                     std::vector<Node>,
+                                     std::greater<Node>> {
+
     public:
         using node_t = Node;
-        using queue_t = std::priority_queue<Node, Sequence, Compare>;
-        using priority_t = typename Node::first_type;
-        using identity_t = typename Node::second_type;
+        using payload_t = typename Node::payload_t;
+        using ordering_t = typename Node::ordering_t;
+        using identity_t = typename Node::identity_t;
+        using timepoint_t = typename Node::timepoint_t;
+        using duration_t = typename timepoint_t::duration;
+        using clock_t = typename timepoint_t::clock;
 
-        explicit merged_queue (size_t k,
-                               const Compare& comp = Compare())
-            : waiting(comp)
-            , cardinality(k)
+        /**
+           Construct a zipper merge of cardinality k.
+
+           A nonzero max_latency must be supplied to enable latency
+           guaratees.
+         */
+        explicit merge (size_t k,
+                        duration_t max_latency = duration_t::zero())
+            : cardinality(k)
+            , latency(latency)
+            , origin(0)         // ordering
         {
         }
 
-        /// Add a node to the queue.
-        void feed(const node_t& node) {
-            const auto ident = node.second;
-            waiting.push(node);
-            occupancy[ident] += 1;
-        }
-        /// Sugar to add a node from its consituent parts.
-        void feed(const priority_t& pri, const identity_t& ident)
-        {
-            feed(node_t(pri, ident));
+        /**
+           Feed a new node to the merge queue.
+
+           Return true if it was accepted.  Rejection will occur if
+           the node partial ordering places it "earlier" (smaller
+           ordering value) than the last drained node.
+        */
+        bool feed(const node_t& node) {
+            if (node.ordering < origin) {
+                return false;
+            }
+            auto& s = streams[node.identity];
+            s.occupancy += 1;
+            s.age = node.debut;
+            this->push(node);
+            return true;
         }
 
-        /// Unconditionally pop and return the top node.
-        node_t drain() {
-            if (waiting.empty()) {
+        /**
+           Sugar to add a node to the queue from its constituents.
+        */
+        bool feed(const payload_t& pay,
+                  const ordering_t& ord,
+                  const identity_t& ident,
+                  const timepoint_t& debut = clock_t::now() )
+        {
+            return feed(node_t{pay, ord, ident, debut});
+        }
+
+        /** Unconditionally pop and return the top node.
+
+            Throws if queue is empty but otherwise does not care about
+            completeness.
+         */
+        node_t next() {
+            if (this->empty()) {
                 throw std::out_of_range("attempt to drain empty queue");
             }
-            // top() and pop() produced UB if called on empty
-            auto node = waiting.top();
-            waiting.pop();
-            occupancy[node.second] -= 1;
+            auto node = this->top(); // copy
+            this->pop();
+
+            auto& s = streams.at(node.identity);
+            s.occupancy -= 1;
+            origin = node.ordering;
+
             return node;
         }
 
-        /// Check what the next drain() would return.
-        const node_t& peek() const {
-            if (waiting.empty()) {
-                throw std::out_of_range("attempt to peek empty queue");
+        /**
+           Return all nodes, unconditionally.
+        */ 
+        template<typename OutputIterator>
+        OutputIterator drain_full(OutputIterator result)
+        {
+            while (!this->empty()) {
+                *result++ = next(); // hey, dev: do not forget back_inserter
             }
-            return waiting.top();
+            return result;
         }
 
-        bool empty() const { return waiting.empty(); }
-        size_t size() const { return waiting.size(); }
+        /**
+           Return available nodes, maintaining latency guaratee.
+
+           Calling this may lead to subsequent input nodes which are
+           tardy to be rejected when fed to the merge.
+
+           Note: if max latecy is zero, this is equivalent to calling
+           @ref drain_waiting().
+        */
+        template<typename OutputIterator>
+        OutputIterator drain_prompt(OutputIterator result,
+                                    const timepoint_t& now = clock_t::now())
+        {
+            while (complete(now)) {
+                *result++ = next(); // hey, dev: do not forget back_inserter
+            }
+            return result;
+        }
 
         /**
-           Return true if the queue has sufficient representation (at
-           least one element from each stream not counting top) to
-           pop.  This is an O(k) check.
+           Return available nodes, maintaining completeness.
+
+           This will preserve ability to accept from future tardy
+           streams but may lead to unbound latency.
+        */
+        template<typename OutputIterator>
+        OutputIterator drain_waiting(OutputIterator result)
+        {
+            while (complete()) {
+                *result++ = next(); // hey, dev: do not forget back_inserter
+            }
+            return result;
+        }
+
+
+        /**
+           Return the next top node without removal.
+
+           Throws if queue is empty.
+        */
+        const node_t& peek() const {
+            if (this->empty()) {
+                throw std::out_of_range("attempt to peek empty queue");
+            }
+            return this->top();
+        }
+
+
+        /**
+           Return true if queue is "complete".
+
+           If a non-minimal "now" time is given then an unreprested
+           but stale stream will not degrade completeness.
          */
-        bool complete() const {
-            if (empty()) {
+        bool complete(const timepoint_t& now = timepoint_t::min()) const {
+            if (this->empty()) {
                 return false;
             }
 
-            auto ident = peek().second;
-            size_t missing = cardinality;
-            for (const auto& it : occupancy) {
-                size_t have = it.second;
-                if (it.first == ident) {
-                    //assert(have > 0);
+            size_t completeness = 0;
+
+            const auto top_ident = this->top().identity;
+
+            // check each stream to see if it is "represented"
+            for (const auto& sit : streams) {
+                const auto& ident = sit.first;
+                auto have = sit.second.occupancy;
+
+                // Do not count the top node.
+                if (top_ident == ident) {
                     have -= 1;
                 }
                 if (have > 0) {
-                    --missing;
+                    ++completeness;
+                    continue;   // stream is represented
                 }
+
+                // check last ditch check where latency
+                // bounding allows us to ignore stale streams.
+
+                if (latency == duration_t::zero()) {
+                    continue;   // no max latency requirement
+                }
+
+                if (now == timepoint_t::min()) { // my clock is broken
+                    continue;
+                }
+
+                const auto& age = sit.second.age;
+                if (now - age < latency) {
+                    continue;
+                }
+
+                // To preserve max latency we consider a stale stream
+                // to be considered "represented".
+                ++completeness;
+
             }
-            return missing == 0;
+            return completeness == cardinality;
         }
 
     private:
         
         const size_t cardinality;
-        queue_t waiting;
-        std::unordered_map<identity_t, size_t> occupancy;
+        const duration_t latency;
+        ordering_t origin;
+        struct Stream {
+            size_t occupancy{0};
+            timepoint_t age{duration_t::min()};
+        };
+        std::unordered_map<identity_t, Stream> streams;
     };
-
-
-    
-    // template <typename MQueue, typename Time = time_t>
-    // class tardy_queue {
-    //     MQueue 
-
-    // public:
-    //     tardy_queue(
-    // };
 
 }
 #endif

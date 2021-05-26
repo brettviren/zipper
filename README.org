@@ -1,48 +1,39 @@
 #+title: Zipper is streaming priority merge queue
 
-* Algorithms
+* Algorithm
 
-** Merged queue
+The ~zipper::merge~ class provides k-way merge with a choice between a
+maximum latency bounds or guarantee of lossless operation but not
+both.
 
-A merged queue presents a /priority queue/ that produces an output
-/stream/ in guaranteed order by merging \(k\) ordered input streams.
+Each of the k-way inputs is called a /stream/ and ~merge~ maintains a
+/min-heap priority queue/ of /nodes/.  Each node correlates the following
+four pieces of information:
 
-We say a stream is "represented" in the queue if the queue contains at
-least one element from the stream (excluding the element at the queue
-~top())~.  We say the queue is "complete" if all streams have
-representation.
+- payload :: a user object
+- ordering :: a value by which nodes may be placed in ascending order
+- identity :: a value indicating the stream.
+- debut :: the "time" which a payload was accepted to the merge
 
-As long as ~top()~ and ~pop()~ are called when the queue is "complete"
-then the output ordering is guaranteed.
+Note, the ordering value is not necessarily itself a time.  
 
-** Tardy queue
+At any given moment of operation, a stream is considered to be
+/represented/ in the merge if at least one node from that stream is held
+in any location of the queue excluding the /top/ of the min-heap.
 
-A tardy queue adds to the ordering guarantee of a merged queue a
-maximum latency guarantee though necessarily with caveats.  A tardy
-queue will be considered "complete" if there are streams that are not
-represented and if those streams have failed to provide input for more
-than a configurable "sync time".
+The ~merge~ object state is considered /fully complete/ if all of the
+k-way streams are represented.  And it is considered /weakly complete/
+if at least all /active/ streams are represented.  An active stream is
+one that has provided recent data within a duration smaller than the
+maximum latency.  Any streams that are not active are called /stale/.
 
-When the queue is "complete" but possibly lacking "representing" the
-caller may use ~top()~ and ~pop()~ to get the next ordered output within
-the latency bound.
-
-Subsequent input from streams that were not "represented" may be
-ordered "before" prior output elements.  Such input is called "tardy"
-and will be dropped as to allow them to enter the queue would assure
-the queue output would become unordered.
-
-The "time" used by the tardy queue is provided by the user.  Internal
-to the queue no system or other "real time" is considered.  Thus the
-latency guarantee here is conceptual and dependent on what "time"
-values the caller provides.  In particular, any "real time" used by
-the operation of the queue itself, though likely insignificant, is not
-included in any latency guarantees.
-
-  
-
-
-
-
-
+The state of completeness may be used to extract or /drain/ nodes from
+the queue in a manner that either achieves the latency bounds or
+assure a lossless queue.  When draining for latency bounding, the
+queue may drain nodes which are ordered "after" (higher /ordering/
+value) than nodes (from other streams) which the user may subsequently
+try to feed.  When a node is fed to the ~merge~ which is ordered
+"before" (lower /ordering/ value) the last node that has been drained it
+will be rejected.  The user is invited to check the Boolean return
+value of ~feed()~ to determine if the node was accepted.
 

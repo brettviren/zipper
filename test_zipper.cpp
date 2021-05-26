@@ -2,40 +2,55 @@
 #include <cassert>
 #include <iostream>
 #include <vector>
+#include <iterator>
+#include <chrono>
+#include <string>
+#include <sstream>
 
-using namespace zipper;
+using node_t = zipper::Node<std::string>;
 
-using node_t = std::pair<int, int>;
+using merge_t = zipper::merge<node_t>;
 
-using merged_ints_t = merged_queue< node_t, std::vector<node_t>,
-                                    std::greater<node_t> >;
+std::vector<std::string> data = {
+    "abcd", "efgh", "ijkl"
+};
+typedef std::chrono::duration<int> seconds;
+// std::vector<merge_t::timepoint_t> nows = {
+//     seconds(5), seconds(10), seconds(50), seconds(55)
+// };
 
-void test_pq ()
+
+bool feed(merge_t& m, size_t stream, size_t index)
 {
-    std::priority_queue<int> pq;
+    const auto s = data[stream].substr(index,1);
 
-    // top() on an empty pq is undefined behavior!
-    // auto got = pq.top();
-    // std::cerr << "test_pq: " << got << std::endl;
-
-    // also undefined
-    // pq.pop();
-
-    /// throws std::out_of_range
-    // std::vector<int> v;
-    // v.at(0);
-
+    return m.feed(s, (size_t)s[0], stream);
 }
 
-
-void test_merge_queue()
+int feedn(merge_t& m, size_t n, size_t start=0)
 {
-    merged_ints_t mq(3);
+    int errors = 0;
+    for (size_t i=start; i < start+n; ++i) {
+        for (auto str : {0, 1, 2}) {
+            bool okay = feed(m, str, i);
+            if (not okay) ++errors;
+         }
+    }
+    return errors;
+}    
 
-    // 0: 1, 2, 3, 4
-    // 1: 2, 4,10
-    // 2: 0, 3, 5, 9
+std::string stringify(const std::vector<node_t>& nodes) {
+    std::stringstream ss;
+    for (const auto& node : nodes) {
+        ss << node.payload;
+    }
+    return ss.str();
+}
 
+// no latency bounds
+void test_drain_full()
+{
+    merge_t mq(3);
     {
         bool caught = false;
         try {
@@ -49,7 +64,7 @@ void test_merge_queue()
     {
         bool caught = false;
         try {
-            mq.drain();
+            mq.next();
         }
         catch (std::out_of_range& err) {
             caught = true;
@@ -58,96 +73,96 @@ void test_merge_queue()
     }
 
     assert(!mq.complete());
+    assert(mq.empty());
 
-    mq.feed(1, 0);
+    int nerr = feedn(mq, 2);
+    assert(!nerr);
+    std::vector<node_t> got;
+    mq.drain_full(std::back_inserter(got));
+    assert(got.size() == 6);
+    assert(mq.empty());
     assert(!mq.complete());
-    assert(mq.peek().first == 1);
-
-    mq.feed(2, 1);
-    assert(!mq.complete());
-    assert(mq.peek().first == 1);
-
-    mq.feed(0, 2);
-    assert(!mq.complete());
-    assert(mq.peek().first == 0);
-
-    mq.feed(2, 0);
-    assert(!mq.complete());
-    assert(mq.peek().first == 0);
-           
-    mq.feed(4, 1);
-    mq.feed(3, 2);
-    assert(mq.complete());
-    assert(mq.peek().first == 0);
-    mq.drain();
-    assert(mq.peek().first == 1);
-    assert(mq.complete());
-
-    mq.feed(3, 0);
-    mq.feed(4, 0);
-    mq.feed(10,1);
-    mq.feed(5,2);
-    mq.feed(9,2);
-
-    mq.drain();
-    assert(mq.peek().first == 2);
-    mq.drain();
-    assert(mq.peek().first == 2);
-    mq.drain();
-    assert(mq.peek().first == 3);
-    mq.drain();
-    assert(mq.peek().first == 3);
-    mq.drain();
-    assert(mq.peek().first == 4);
-    mq.drain();
-    assert(mq.peek().first == 4);
-    mq.drain();
-    assert(mq.peek().first == 5);
-    assert(mq.peek().second == 2);
-    assert(!mq.complete());
-    mq.drain();
-    assert(mq.peek().first == 9);
-    assert(mq.peek().second == 2);
-    mq.drain();
-    assert(mq.peek().first == 10);
-    assert(mq.peek().second == 1);
-    mq.drain();
-    
+    auto str = stringify(got);
+    std::cerr << str << std::endl;
+    assert(str == "abefij");
 }
-#include <chrono>
-#include <iostream>
+
+void test_drain_waiting()
+{
+    merge_t mq(3);
+
+    int nerr = feedn(mq, 2);
+    assert(!nerr);
+    std::vector<node_t> got;
+    mq.drain_waiting(std::back_inserter(got));
+    assert(got.size() == 1);
+    assert(mq.size() == 5);
+    assert(mq.peek().payload == "b");
+    assert(!mq.complete());  // "b" is in top so 0 is not rep'ped
+
+    nerr = feedn(mq, 1, 2);
+    assert(!nerr);
+    assert(mq.peek().payload == "b");
+    assert(mq.complete());
+    
+    mq.drain_waiting(std::back_inserter(got));
+    assert(mq.peek().payload == "c");
+    assert(got.size() == 2);
+    assert(mq.size() == 7);
+
+    nerr = feedn(mq, 1, 3);
+    mq.drain_waiting(std::back_inserter(got));
+    assert(mq.peek().payload == "d");
+
+    mq.drain_full(std::back_inserter(got));
+    assert(mq.empty());
+    auto str = stringify(got);
+    std::cerr << str << std::endl;
+    assert(str == "abcd" "efgh" "ijkl");
+
+}    
+
 
 void test_merge_speed()
 {
+    std::cerr << "speed test...\n";
     auto t0 = std::chrono::steady_clock::now();
-    merged_ints_t mq(3);
+    merge_t mq(3);
 
+    size_t count = 0;
     int nele = 10000000;
     for (int ele=0; ele<nele; ++ele) {
-        for (int k=0; k<3; ++k) {
-            mq.feed(ele,k);
-        }
 
+        for (auto ind : {0, 1, 2, 3}) {
+            for (auto str : {0, 1, 2}) {
+                const auto s = data[str].substr(ind,1);            
+                mq.feed(s, ele + s[0], str);
+            }
+        }
+        
         // emulate a delayed drain
         if (mq.size() < 100) {
             continue;
         }
-        for (int k=0; k<3; ++k) {
-            mq.drain();
-        }            
+        std::vector<node_t> got;
+        mq.drain_waiting(std::back_inserter(got));
+        count += got.size();
     }
+
     auto t1 = std::chrono::steady_clock::now();
     double dt = std::chrono::duration_cast<std::chrono::microseconds>(t1-t0).count();
     double rate = nele / dt;
     std::cerr << "N="<< nele*1e-6 << " M, " << dt*1e-6 << " s, " << rate << " MHz" << std::endl;
+    std::cerr << "drained " << count << std::endl;
 }
 
 
 int main()
 {
-    test_pq();
-    test_merge_queue();
+    std::cerr << "test_zipper\n";
+    test_drain_full();
+    test_drain_waiting();
     test_merge_speed();
-
+ 
     return 0;
 }
