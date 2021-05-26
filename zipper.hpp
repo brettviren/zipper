@@ -6,31 +6,19 @@
 
 namespace zipper {
 
-    // template <typename Element, typename Stream>
-    // struct Node {
-    //     Element element;
-    //     Stream stream;
-    // };
-
-    // template <typename Element, typename Stream>
-    // struct NodeAscending {
-    //     using node_t = Node<Element, Stream>;
-    //     bool operator()(const node_t& a, const node_t& b) {
-    //         return a.element > b.element;
-    //     }
-    // };
-    // template <typename Element, typename Stream>
-    // struct NodeDescending {
-    //     using node_t = Node<Element, Stream>;
-    //     bool operator()(const node_t& a, const node_t& b) {
-    //         return a.element < b.element;
-    //     }
-    // };
-
     /**
        A k-way merged queue. 
 
-       A "node" is a pair: (priority, identity)
+       A "node" or "element" in the queue is a pair of values:
+       (priority, identity)
+
+       The "priority" is any value that can be partially ordered (has
+       a "less than" operator or one can be provided as the "Compare"
+       template parameter).
+
+       The "identity" is any value that can be hashed and is used
+       define a "stream".  That is, all "priority" objects with a
+       common "identity" are so grouped.
 
     */
     template <typename Node,
@@ -50,26 +38,36 @@ namespace zipper {
         {
         }
 
-        /// Push as Node.
-        void push(const node_t& node) {
+        /// Add a node to the queue.
+        void feed(const node_t& node) {
             const auto ident = node.second;
             waiting.push(node);
             occupancy[ident] += 1;
         }
-        void push(const priority_t& pri, const identity_t& ident)
+        /// Sugar to add a node from its consituent parts.
+        void feed(const priority_t& pri, const identity_t& ident)
         {
-            push(node_t(pri, ident));
+            feed(node_t(pri, ident));
         }
 
-        const node_t& top() const {
-            return waiting.top();
-        }
-
-        /// Pop the top.
-        void pop() {
-            const auto ident = top().second;
+        /// Unconditionally pop and return the top node.
+        node_t drain() {
+            if (waiting.empty()) {
+                throw std::out_of_range("attempt to drain empty queue");
+            }
+            // top() and pop() produced UB if called on empty
+            auto node = waiting.top();
             waiting.pop();
-            occupancy[ident] -= 1;
+            occupancy[node.second] -= 1;
+            return node;
+        }
+
+        /// Check what the next drain() would return.
+        const node_t& peek() const {
+            if (waiting.empty()) {
+                throw std::out_of_range("attempt to peek empty queue");
+            }
+            return waiting.top();
         }
 
         bool empty() const { return waiting.empty(); }
@@ -81,12 +79,16 @@ namespace zipper {
            pop.  This is an O(k) check.
          */
         bool complete() const {
-            auto ident = top().second;
+            if (empty()) {
+                return false;
+            }
+
+            auto ident = peek().second;
             size_t missing = cardinality;
             for (const auto& it : occupancy) {
                 size_t have = it.second;
                 if (it.first == ident) {
-                    assert(have > 0);
+                    //assert(have > 0);
                     have -= 1;
                 }
                 if (have > 0) {

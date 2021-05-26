@@ -1,5 +1,7 @@
-#include <cassert>
 #include "zipper.hpp"
+#include <cassert>
+#include <iostream>
+#include <vector>
 
 using namespace zipper;
 
@@ -7,6 +9,24 @@ using node_t = std::pair<int, int>;
 
 using merged_ints_t = merged_queue< node_t, std::vector<node_t>,
                                     std::greater<node_t> >;
+
+void test_pq ()
+{
+    std::priority_queue<int> pq;
+
+    // top() on an empty pq is undefined behavior!
+    // auto got = pq.top();
+    // std::cerr << "test_pq: " << got << std::endl;
+
+    // also undefined
+    // pq.pop();
+
+    /// throws std::out_of_range
+    // std::vector<int> v;
+    // v.at(0);
+
+}
+
 
 void test_merge_queue()
 {
@@ -16,59 +36,82 @@ void test_merge_queue()
     // 1: 2, 4,10
     // 2: 0, 3, 5, 9
 
-    mq.push(1, 0);
-    assert(!mq.complete());
-    assert(mq.top().first == 1);
+    {
+        bool caught = false;
+        try {
+            mq.peek();
+        }
+        catch (std::out_of_range& err) {
+            caught = true;
+        }
+        assert(caught);
+    }
+    {
+        bool caught = false;
+        try {
+            mq.drain();
+        }
+        catch (std::out_of_range& err) {
+            caught = true;
+        }
+        assert(caught);
+    }
 
-    mq.push(2, 1);
     assert(!mq.complete());
-    assert(mq.top().first == 1);
 
-    mq.push(0, 2);
+    mq.feed(1, 0);
     assert(!mq.complete());
-    assert(mq.top().first == 0);
+    assert(mq.peek().first == 1);
 
-    mq.push(2, 0);
+    mq.feed(2, 1);
     assert(!mq.complete());
-    assert(mq.top().first == 0);
+    assert(mq.peek().first == 1);
+
+    mq.feed(0, 2);
+    assert(!mq.complete());
+    assert(mq.peek().first == 0);
+
+    mq.feed(2, 0);
+    assert(!mq.complete());
+    assert(mq.peek().first == 0);
            
-    mq.push(4, 1);
-    mq.push(3, 2);
+    mq.feed(4, 1);
+    mq.feed(3, 2);
     assert(mq.complete());
-    assert(mq.top().first == 0);
-    mq.pop();
-    assert(mq.top().first == 1);
+    assert(mq.peek().first == 0);
+    mq.drain();
+    assert(mq.peek().first == 1);
     assert(mq.complete());
 
-    mq.push(3, 0);
-    mq.push(4, 0);
-    mq.push(10,1);
-    mq.push(5,2);
-    mq.push(9,2);
+    mq.feed(3, 0);
+    mq.feed(4, 0);
+    mq.feed(10,1);
+    mq.feed(5,2);
+    mq.feed(9,2);
 
-    mq.pop();
-    assert(mq.top().first == 2);
-    mq.pop();
-    assert(mq.top().first == 2);
-    mq.pop();
-    assert(mq.top().first == 3);
-    mq.pop();
-    assert(mq.top().first == 3);
-    mq.pop();
-    assert(mq.top().first == 4);
-    mq.pop();
-    assert(mq.top().first == 4);
-    mq.pop();
-    assert(mq.top().first == 5);
-    assert(mq.top().second == 2);
+    mq.drain();
+    assert(mq.peek().first == 2);
+    mq.drain();
+    assert(mq.peek().first == 2);
+    mq.drain();
+    assert(mq.peek().first == 3);
+    mq.drain();
+    assert(mq.peek().first == 3);
+    mq.drain();
+    assert(mq.peek().first == 4);
+    mq.drain();
+    assert(mq.peek().first == 4);
+    mq.drain();
+    assert(mq.peek().first == 5);
+    assert(mq.peek().second == 2);
     assert(!mq.complete());
-    mq.pop();
-    assert(mq.top().first == 9);
-    assert(mq.top().second == 2);
-    mq.pop();
-    assert(mq.top().first == 10);
-    assert(mq.top().second == 1);
-    mq.pop();
+    mq.drain();
+    assert(mq.peek().first == 9);
+    assert(mq.peek().second == 2);
+    mq.drain();
+    assert(mq.peek().first == 10);
+    assert(mq.peek().second == 1);
+    mq.drain();
     
 }
 #include <chrono>
@@ -82,13 +125,15 @@ void test_merge_speed()
     int nele = 10000000;
     for (int ele=0; ele<nele; ++ele) {
         for (int k=0; k<3; ++k) {
-            mq.push(ele,k);
+            mq.feed(ele,k);
         }
+
+        // emulate a delayed drain
         if (mq.size() < 100) {
             continue;
         }
         for (int k=0; k<3; ++k) {
-            mq.push(ele,k);
+            mq.drain();
         }            
     }
     auto t1 = std::chrono::steady_clock::now();
@@ -100,6 +145,7 @@ void test_merge_speed()
 
 int main()
 {
+    test_pq();
     test_merge_queue();
     test_merge_speed();
 
