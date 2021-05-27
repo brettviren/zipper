@@ -5,6 +5,8 @@
 #include <chrono>
 #include <unordered_map>
 
+#include <iostream>             // temp debug
+
 namespace zipper {
 
     /**
@@ -77,7 +79,7 @@ namespace zipper {
         explicit merge (size_t k,
                         duration_t max_latency = duration_t::zero())
             : cardinality(k)
-            , latency(latency)
+            , latency(max_latency)
             , origin(0)         // ordering
         {
         }
@@ -95,7 +97,7 @@ namespace zipper {
             }
             auto& s = streams[node.identity];
             s.occupancy += 1;
-            s.age = node.debut;
+            s.last_seen = node.debut;
             this->push(node);
             return true;
         }
@@ -223,34 +225,47 @@ namespace zipper {
                 // bounding allows us to ignore stale streams.
 
                 if (latency == duration_t::zero()) {
-                    continue;   // no max latency requirement
+                    // std::cerr << "no latency " << ident << std::endl;
+                    return false;
                 }
 
                 if (now == timepoint_t::min()) { // my clock is broken
-                    continue;
+                    // std::cerr << "clock broken " << ident << std::endl;
+                    return false;
                 }
 
-                const auto& age = sit.second.age;
-                if (now - age < latency) {
-                    continue;
+                const auto& last_seen = sit.second.last_seen;
+                auto delta = now - last_seen;
+                auto delta_us =
+                    std::chrono::duration_cast<std::chrono::microseconds> (delta);
+                if (delta < latency) {
+                    // std::cerr << "still active " << ident
+                    //           << " [" << completeness
+                    //           << "] " << delta_us.count() << " us"
+                    //           << std::endl;
+                    return false;
                 }
 
-                // To preserve max latency we consider a stale stream
-                // to be considered "represented".
+                // std::cerr << "missing but stale " << ident
+                //           << " [" << completeness
+                //           << "] " << delta_us.count() << " us"
+                //           << std::endl;
+                // To preserve max latency we will not consider this
+                // stale "unrepresented" to cause incompleteness.
                 ++completeness;
-
             }
+
             return completeness == cardinality;
         }
 
     private:
         
         const size_t cardinality;
-        const duration_t latency;
+        const duration_t latency{0};
         ordering_t origin;
         struct Stream {
             size_t occupancy{0};
-            timepoint_t age{duration_t::min()};
+            timepoint_t last_seen{duration_t::min()};
         };
         std::unordered_map<identity_t, Stream> streams;
     };
