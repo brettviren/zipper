@@ -1,4 +1,5 @@
 // Run zipper hard with semi realistic payload to stress and profile.
+// This version runs in lossy, latency bounding mode.
 
 #include "zipper.hpp"
 
@@ -6,8 +7,9 @@
 #include <algorithm>            // transform, sort
 #include <vector>
 #include <iostream>
-
+#include <thread> 
 #include <cassert>
+#include <sstream>
 
 // mock of trigger primitive and its set
 struct Chunk {
@@ -22,6 +24,12 @@ struct Payload {
 using node_t = zipper::Node<Payload>;
 using merge_t = zipper::merge<node_t>;
 
+std::string tostr(const node_t& node) {
+    std::stringstream ss;
+    ss << "node: #" << node.identity << " @" << node.ordering;
+    return ss.str();
+}
+
 const int nchunks=100;
 
 node_t init_node(size_t identity)
@@ -34,13 +42,13 @@ node_t init_node(size_t identity)
 }
 
 
-node_t make_node(size_t identity, size_t last_ordering = 0);
-node_t make_node(size_t identity, size_t last_ordering)
+node_t make_node(size_t identity, size_t last_ordering,
+                 node_t::timepoint_t tnow)
 {
     size_t ordering = last_ordering + 1; // make more variable.
     Payload payload;
     payload.chunks.resize(nchunks);
-    return node_t{payload, ordering, identity, merge_t::clock_t::now()};
+    return node_t{payload, ordering, identity, tnow};
 }
 
 // sort nodes in descending order value
@@ -53,6 +61,7 @@ int main()
 {
     const int nstreams=10;
     const int nsend=10000000;
+    size_t nlost = 0;
 
     std::vector<size_t> streamid(nstreams);
     std::iota(streamid.begin(), streamid.end(), 0);
@@ -61,37 +70,60 @@ int main()
     std::transform(streamid.begin(), streamid.end(),
                    std::back_inserter(stream), init_node);
 
-    merge_t zm(nstreams);
+    merge_t zm(nstreams, std::chrono::microseconds(1000));
 
-    auto t0 = std::chrono::steady_clock::now();
-    std::chrono::nanoseconds zmdt;
+    auto t0 = merge_t::clock_t::now();
+    std::chrono::nanoseconds zmdt{0};
     for (int count = 0 ; count < nsend; ++count) {
 
         // find next "active" stream
         std::sort(stream.begin(), stream.end(), sorder);
         node_t node = stream.back();
 
-        // make next "produced" node in the stream
-        stream.back() = make_node(node.identity, node.ordering);
-        
-        auto ta = std::chrono::steady_clock::now();
+        auto tnow = merge_t::clock_t::now();
+
+        // are you from the future?
+        while (node.debut > tnow) {
+            std::this_thread::sleep_for (std::chrono::microseconds(1));
+            tnow = merge_t::clock_t::now();
+            
+            auto diff = tnow.time_since_epoch().count() -
+                node.debut.time_since_epoch().count();
+            std::cerr << "waiting: " << diff << std::endl;
+        }
+
+        // Given sad Mr. 1 a slow down
+        auto delay = std::chrono::microseconds(1);
+        // if (node.identity == 1 and count %3 == 1) {
+        //     delay = std::chrono::microseconds(10);
+        // }
+
+        stream.back() = make_node(node.identity, node.ordering,
+                                  tnow + delay);
+
         // feed the merge
         bool accepted = zm.feed(node);
 
-        // lossless mode for now
-        assert(accepted);       
+        if (!accepted) {
+            ++nlost;
+        }
 
         // drain the merge
         std::vector<node_t> got;
-        zm.drain_waiting(std::back_inserter(got));
-        auto tb = std::chrono::steady_clock::now();
-        zmdt += tb-ta;
+        zm.drain_prompt(std::back_inserter(got));
+        auto tlater = merge_t::clock_t::now();
+        zmdt += tlater-tnow;
+        // std::cerr << "drained: " << got.size() << " " << zm.size() << std::endl;
     }
 
-    auto t1 = std::chrono::steady_clock::now();
+    auto t1 = merge_t::clock_t::now();
     double dt = std::chrono::duration_cast<std::chrono::microseconds>(t1-t0).count();
     double rate = nsend / dt;
-    std::cerr << "Nstream=" << nstreams << ", Nsend="<< nsend*1e-6 << " M" << ", Nchunks=" << nchunks << std::endl;
+    std::cerr << "Nstream=" << nstreams
+              << ", Nsend="<< nsend*1e-6 << " M"
+              << ", Nchunks=" << nchunks
+              << ", Nlost="<< nlost << ", Nleft=" << zm.size()
+              << std::endl;
     std::cerr << "Tot: " << dt*1e-6 << " s, " << rate << " MHz" << std::endl;
 
     double zmus =  std::chrono::duration_cast<std::chrono::microseconds>(zmdt).count();
