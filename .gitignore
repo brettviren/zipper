@@ -1,2 +1,4 @@
 *~
 test_zipper
+*.prof
+stress_zipper

@@ -37,3 +37,86 @@ try to feed.  When a node is fed to the ~merge~ which is ordered
 will be rejected.  The user is invited to check the Boolean return
 value of ~feed()~ to determine if the node was accepted.
 
+
+* Performance
+
+With ~-O2~ or ~-O3~, the [[file:zipper_stress.cpp]] achieves:
+
+#+begin_example
+❯ g++ -O2 -std=c++17 -o stress_zipper stress_zipper.cpp && time ./stress_zipper
+Nstream=10, Nsend=10 M, Nchunks=100
+Tot: 8.22475 s, 1.21584 MHz
+Zip: 2.7205 s, 3.6758 MHz
+
+________________________________________________________
+Executed in    8.23 secs    fish           external
+   usr time    8.22 secs  581.00 micros    8.22 secs
+   sys time    0.00 secs  101.00 micros    0.00 secs
+
+❯ g++ -O3 -std=c++17 -o stress_zipper stress_zipper.cpp && time ./stress_zipper
+Nstream=10, Nsend=10 M, Nchunks=100
+Tot: 6.49373 s, 1.53995 MHz
+Zip: 2.48493 s, 4.02425 MHz
+
+________________________________________________________
+Executed in    6.50 secs    fish           external
+#+end_example
+
+The "Zip" part counts time to call just ~feed()~ and ~drain_waiting()~.
+The rest is mostly taken up to perform the ~std::sort()~ to find the
+next "active" stream.  This is the "application's problem".
+
+With *no optimization* code runs about 10x slower but it is useful to
+turn it off in order that profiling makes more sense.  Here is a look
+with Google's Perftools.
+
+#+begin_example
+❯ g++ -g -std=c++17 -o stress_zipper stress_zipper.cpp
+❯ CPUPROFILE=stress-zipper.prof LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libprofiler.so.0 ./stress_zipper
+Nstream=10, Nsend=1 M, Nchunks=100
+Tot: 6.97106 s, 0.14345 MHz
+Zip: 2.98409 s, 0.335111 MHz
+PROFILE: interrupts/evictions/bytes = 696/186/67672
+❯ google-pprof --lines --pdf ./stress_zipper stress-zipper.prof > stress-zipper.pdf
+#+end_example
+
+See [[file:stress-zipper.pdf]] for that detailed output.  Code line
+numbers have changed.  We also reduced the number of sends by 10x to
+get similar run time as optimized case (who has time to wait a whole
+minute to run a program?!).
+
+The zipper branches are seen to account for about 50% of the total
+running as summarized:
+
+- 40% in ~drain_waiting()~
+  - 19% in ~next()~ (pop'ing the heap)
+  - 5% in ~complete()~ (checking if safe to drain)
+  - 3% in ~back_inserter()~ (filling output)
+- 8% in ~feed()~ (mostly heap insertion)
+  
+Most of the time is ultimately spent in constructing, destructing and
+copying the ~Node::payload~ object.  If this is a problem, the caller
+could provide payloads as pointers or another scalar index.
+
+Replacing ~Payload~ with ~size_t~ gives almost 3x speed up.  Note, 10x
+more than prior optimized.
+
+#+begin_example
+❯ g++ -O2 -std=c++17 -o stress_zipper stress_zipper.cpp && time ./stress_zipper
+Nstream=10, Nsend=100 M, Nchunks=100
+Tot: 18.9862 s, 5.26698 MHz
+Zip: 8.63253 s, 11.5841 MHz
+
+________________________________________________________
+Executed in   18.99 secs    fish           external
+   usr time   18.98 secs    0.00 micros   18.98 secs
+   sys time    0.00 secs  736.00 micros    0.00 secs
+#+end_example
+
+Note, above ~-O2~ is used as ~-O3~ breaks time collection.  Possibly due
+too-small clock granularity summing time over "too-fast" calls.  Or,
+maybe the ~feed()~ and ~drain_waiting()~ are optimized away since no data
+is used from their returns?
+
+In any case, sending an index to a Payload through the merge instead of the entire object gives about 3x speed up.
+
