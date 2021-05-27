@@ -132,6 +132,3 @@ Executed in    8.12 secs    fish           external
 
 It is currently 2x slower than lossless.
 
-* TODO
-
-More testing is needed to speed up and confirm lossy is working.
