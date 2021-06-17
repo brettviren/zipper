@@ -5,3 +5,4 @@ stress_zipper
 log
 stress_lossy
 test_lossy
+test_cardinality

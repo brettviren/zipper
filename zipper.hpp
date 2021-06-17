@@ -71,17 +71,57 @@ namespace zipper {
         using clock_t = typename timepoint_t::clock;
 
         /**
-           Construct a zipper merge of cardinality k.
+           Construct a zipper merge.
+
+           See @ref set_cardinality() for the "k" parameter.
 
            A nonzero max_latency must be supplied to enable latency
            guaratees.
          */
-        explicit merge (size_t k,
+        explicit merge (size_t k=0,
                         duration_t max_latency = duration_t::zero())
             : cardinality(k)
             , latency(max_latency)
             , origin(0)         // ordering
         {
+        }
+
+        /** 
+            Set the expected number of identified streams.
+
+            Cardinality is used to determine completeness.
+            Completeness is achieved when the number of streams which
+            are represented in the zipper matches the cardinality.
+
+            Cardinality may be arbitrarily set anytime prior to the
+            first drain.
+
+            A subsequent increase in the expected number of streams
+            may be accomodated by increasing the cardinality to match.
+
+            Subsequent reduction of cardinality will result in
+            undefined behavior which may drain output prematurely.
+            Once elements causing "over completeness" are drained the
+            zipper returns to expected behavior.
+
+            To avoid this, at the cost of draining the entire merge
+            buffer, see @ref clear();
+
+            A cardinality of zero will cause the zipper always be
+            considered complete and thus will exhibit permanent
+            undefined behavior as described above.
+        */
+        void set_cardinality(size_t k) {
+            cardinality = k;
+        }
+
+        /**
+           Clear the zipper merge buffer.
+        */
+        void clear() {
+            std::vector<node_t> got;
+            drain_full(std::back_inserter(got));
+            origin = 0;
         }
 
         /**
@@ -116,7 +156,9 @@ namespace zipper {
         /** Unconditionally pop and return the top node.
 
             Throws if queue is empty but otherwise does not care about
-            completeness.
+            completeness.  
+
+            Cardinality may be set any time prior to the first drain.
          */
         node_t next() {
             if (this->empty()) {
@@ -195,7 +237,7 @@ namespace zipper {
         /**
            Return true if queue is "complete".
 
-           If a non-minimal "now" time is given then an unreprested
+           If a non-minimal "now" time is given then an unrepresented
            but stale stream will not degrade completeness.
          */
         bool complete(const timepoint_t& now = timepoint_t::min()) const {
@@ -255,12 +297,12 @@ namespace zipper {
                 ++completeness;
             }
 
-            return completeness == cardinality;
+            return completeness >= cardinality;
         }
 
     private:
         
-        const size_t cardinality;
+        size_t cardinality;
         const duration_t latency{0};
         ordering_t origin;
         struct Stream {

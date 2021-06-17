@@ -2,43 +2,70 @@
 
 * Algorithm
 
-The ~zipper::merge~ class provides k-way merge with a choice between a
-maximum latency bounds or guarantee of lossless operation but not
-both.
+The ~zipper::merge~ class provides k-way merge across k streams.  The
+streams need not be synchronized in (real) time but must be strictly
+ordered in each stream by a value that may be compared across streams
+(eg a /data time/).
 
-Each of the k-way inputs is called a /stream/ and ~merge~ maintains a
-/min-heap priority queue/ of /nodes/.  Each node correlates the following
-four pieces of information:
+In light of the real time nature of the streams, the merge enacts one
+of two policies.  It guarantee a maximum latency bound at the cost of
+possible message loss or it may guarantee lossless operation at the
+cost of unbound latency.
+
+The ~merge~ maintains a /min-heap priority queue/ of /nodes/.  Each node
+correlates the following four pieces of information:
 
 - payload :: a user object
 - ordering :: a value by which nodes may be placed in ascending order
 - identity :: a value indicating the stream.
 - debut :: the "time" which a payload was accepted to the merge
 
-Note, the ordering value is not necessarily itself a time.  
+The ordering value is sometimes called a /data time/ though it does not
+necessarily have to represent a time.  
 
-At any given moment of operation, a stream is considered to be
+At any given moment of operation, a given stream is considered to be
 /represented/ in the merge if at least one node from that stream is held
-in any location of the queue excluding the /top/ of the min-heap.
+in any location of the queue excluding the current /top/ of the
+min-heap.
 
-The ~merge~ object state is considered /fully complete/ if all of the
-k-way streams are represented.  And it is considered /weakly complete/
-if at least all /active/ streams are represented.  An active stream is
-one that has provided recent data within a duration smaller than the
-maximum latency.  Any streams that are not active are called /stale/.
+The state of the ~merge~ buffer is considered /fully complete/ if all of
+the k-way streams are represented.  And it is considered /weakly
+complete/ if at least all /active/ streams are represented.  An active
+stream is one that has provided recent data within a duration smaller
+than the maximum latency.  Any streams that are not active are called
+/stale/.
 
-The state of completeness may be used to extract or /drain/ nodes from
-the queue in a manner that either achieves the latency bounds or
-assure a lossless queue.  When draining for latency bounding, the
-queue may drain nodes which are ordered "after" (higher /ordering/
-value) than nodes (from other streams) which the user may subsequently
-try to feed.  When a node is fed to the ~merge~ which is ordered
-"before" (lower /ordering/ value) the last node that has been drained it
-will be rejected.  The user is invited to check the Boolean return
-value of ~feed()~ to determine if the node was accepted.
+The state of completeness is considered when the user asks to extract
+or /drain/ nodes from the queue.  It is when a drain is performed that
+either the latency bounds or lossless assurance is applied.  When
+draining for latency bounding, the queue may drain nodes which are
+ordered "after" (higher /ordering/ value) than nodes (from other
+streams) which the user may subsequently try to feed.  When a node is
+fed to the ~merge~ which is ordered "before" (lower /ordering/ value) the
+last node that has been drained it will be rejected.  The user is
+invited to check the Boolean return value of ~feed()~ to determine if
+the node was accepted.
+
+The "k" parameter is called the cardinality of the ~merge~ buffer.  The
+current completeness is compared to cardinality in determining which
+elements to drain.  The cardinality may be safely increased during
+operation of the merge to accommodate the introduction of novel input
+streams.
+
+The cardinality may be reduced to accommodate removal of input
+streams.  However, this may lead to an over-complete condition and
+thus may cause elements to be drained sooner than otherwise expected.
+Once elements of the removed streams have been flushed, the ~merge~
+buffer should return to normal behavior.
+
+The buffer may also be purged (cleared) of contents with the
+cardinality kept or modified.  Upon clearing it behaves as if it was
+newly constructed.
 
 
 * Performance
+
+Caveat: these micro benchmarks may not be up to date with the code.
 
 With ~-O2~ or ~-O3~, the [[file:zipper_stress.cpp]] achieves:
 
