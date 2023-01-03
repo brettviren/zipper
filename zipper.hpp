@@ -3,9 +3,10 @@
 
 #include <queue>
 #include <chrono>
+#include <vector>
+#include <functional>
 #include <unordered_map>
-
-#include <iostream>             // temp debug
+#include <stdexcept>
 
 namespace zipper {
 
@@ -267,12 +268,10 @@ namespace zipper {
                 // bounding allows us to ignore stale streams.
 
                 if (latency == duration_t::zero()) {
-                    // std::cerr << "no latency " << ident << std::endl;
                     return false;
                 }
 
                 if (now == timepoint_t::min()) { // my clock is broken
-                    // std::cerr << "clock broken " << ident << std::endl;
                     return false;
                 }
 
@@ -281,17 +280,9 @@ namespace zipper {
                 auto delta_us =
                     std::chrono::duration_cast<std::chrono::microseconds> (delta);
                 if (delta < latency) {
-                    // std::cerr << "still active " << ident
-                    //           << " [" << completeness
-                    //           << "] " << delta_us.count() << " us"
-                    //           << std::endl;
                     return false;
                 }
 
-                // std::cerr << "missing but stale " << ident
-                //           << " [" << completeness
-                //           << "] " << delta_us.count() << " us"
-                //           << std::endl;
                 // To preserve max latency we will not consider this
                 // stale "unrepresented" to cause incompleteness.
                 ++completeness;
