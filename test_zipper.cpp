@@ -130,7 +130,8 @@ void test_merge_speed()
     merge_t mq(3);
 
     size_t count = 0;
-    int nele = 10000000;
+    // int nele = 10000000;
+    int nele = 1000000;
     for (int ele=0; ele<nele; ++ele) {
 
         for (auto ind : {0, 1, 2, 3}) {

@@ -6,3 +6,5 @@ log
 stress_lossy
 test_lossy
 test_cardinality
+.lock-waf*
+build

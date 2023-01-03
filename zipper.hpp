@@ -182,7 +182,8 @@ namespace zipper {
         OutputIterator drain_full(OutputIterator result)
         {
             while (!this->empty()) {
-                *result++ = next(); // hey, dev: do not forget back_inserter
+                *result = next(); // hey, dev: do not forget back_inserter
+                ++result;
             }
             return result;
         }
@@ -201,7 +202,8 @@ namespace zipper {
                                     const timepoint_t& now = clock_t::now())
         {
             while (complete(now)) {
-                *result++ = next(); // hey, dev: do not forget back_inserter
+                *result = next(); // hey, dev: do not forget back_inserter
+                ++result;
             }
             return result;
         }
@@ -216,7 +218,8 @@ namespace zipper {
         OutputIterator drain_waiting(OutputIterator result)
         {
             while (complete()) {
-                *result++ = next(); // hey, dev: do not forget back_inserter
+                *result = next(); // hey, dev: do not forget back_inserter
+                ++result;
             }
             return result;
         }
@@ -234,23 +237,36 @@ namespace zipper {
             return this->top();
         }
 
-
         /**
            Return true if queue is "complete".
 
-           If a non-minimal "now" time is given then an unrepresented
-           but stale stream will not degrade completeness.
+           If the queue is empty, the queue is incomplete.
+
+           If latency is unbound and streams are absent (never yet
+           seen) the queue is incomplete.
+
+           If a non-minimal "now" time is given completeness will not
+           be degraded by an unrepresented but stale stream or a
+           stream which is absent (never yet seen).
          */
         bool complete(const timepoint_t& now = timepoint_t::min()) const {
             if (this->empty()) {
                 return false;
             }
 
+            const int target_cardinality = streams.size();
+
+            if (target_cardinality < cardinality) { // absent streams
+                if (latency == duration_t::zero()) { // unbound latency
+                    return false;
+                }
+            }
+
             size_t completeness = 0;
 
             const auto top_ident = this->top().identity;
 
-            // check each stream to see if it is "represented"
+            // check each known stream to see if it is "represented"
             for (const auto& sit : streams) {
                 const auto& ident = sit.first;
                 auto have = sit.second.occupancy;
@@ -264,17 +280,17 @@ namespace zipper {
                     continue;   // stream is represented
                 }
 
-                // check last ditch check where latency
-                // bounding allows us to ignore stale streams.
-
+                // unbound latency, we wait as long as we need.
                 if (latency == duration_t::zero()) {
                     return false;
                 }
 
-                if (now == timepoint_t::min()) { // my clock is broken
+                // only observe latency guarantees given non-minimal time.
+                if (now == timepoint_t::min()) {
                     return false;
                 }
 
+                // we are observing latency guarantees
                 const auto& last_seen = sit.second.last_seen;
                 auto delta = now - last_seen;
                 auto delta_us =
@@ -288,7 +304,7 @@ namespace zipper {
                 ++completeness;
             }
 
-            return completeness >= cardinality;
+            return completeness >= target_cardinality;
         }
 
     private:
