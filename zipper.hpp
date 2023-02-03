@@ -254,7 +254,7 @@ namespace zipper {
                 return false;
             }
 
-            const int target_cardinality = streams.size();
+            const size_t target_cardinality = streams.size();
 
             if (target_cardinality < cardinality) { // absent streams
                 if (latency == duration_t::zero()) { // unbound latency

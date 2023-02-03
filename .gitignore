@@ -8,3 +8,4 @@ test_lossy
 test_cardinality
 .lock-waf*
 build
+simcpp20
