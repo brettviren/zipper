@@ -57,12 +57,11 @@ const double tick_period = 1e-6*sim_time_second;
 // 3. The zipper "debut" and "now" represent "real" (system or here
 // sim) time and is represented by std::chrono timepoint. 
 
-// Each source function's parametrization 
-struct source_config_t {
-    size_t ident;
-    std::shared_ptr<mqueue_t> outbox;
-};
 
+struct inbox_t {
+    std::shared_ptr<mqueue_t> inbox;
+    mqueue_t::pop_event_t operator()() { return inbox->pop(); }
+};
 struct outbox_t {
     std::shared_ptr<mqueue_t> outbox;
     mqueue_t::push_event_t operator()(message_t msg) { return outbox->push(msg); }
@@ -80,9 +79,13 @@ message_t::timepoint_t timepoint(double now)
     return message_t::timepoint_t(tdur);
 }
 
-event_t source(sim_t& sim, size_t ident, outbox_t out, delay_t del)
+
+struct source_stat_t {
+    size_t count{0};
+};
+event_t source(sim_t& sim, source_stat_t& stat, size_t ident, outbox_t out, delay_t del)
 {
-    for (size_t seqno=0; ; ++seqno) {
+    while (true) {
 
         // simulate random wait for some TP activity
         const double delay = del();
@@ -101,23 +104,64 @@ event_t source(sim_t& sim, size_t ident, outbox_t out, delay_t del)
         // here a timeout + event abort to simulate loss.
         co_await out(msg);
         // std::cerr << sim << ident << " -> " << msg << "\n";
+        ++stat.count;
     }
 }
-
-struct inbox_t {
-    std::shared_ptr<mqueue_t> inbox;
-    mqueue_t::pop_event_t operator()() { return inbox->pop(); }
-};
     
-event_t sink(sim_t& sim, size_t ident, inbox_t in)
+struct sink_stat_t {
+    size_t count{0};
+};
+event_t sink(sim_t& sim, sink_stat_t& stat, size_t ident, inbox_t in)
 {
     while (true) {
         // std::cerr << sim << ident << " sink wait\n";
-        auto got = (co_await in());
+        co_await in();
+        ++stat.count;
         // std::cerr << sim << ident << " <- " << got << "\n";
     }
 }
 
+struct transfer_stat_t {
+    size_t count{0};
+};
+event_t transfer(sim_t& sim, transfer_stat_t& stat, size_t ident, inbox_t in, outbox_t out, delay_t del)
+{
+    while (true) {
+        auto msg = (co_await in());
+        co_await sim.timeout(del());
+        co_await out(msg);
+        ++stat.count;
+    }
+}
+
+struct zipit_stat_t {
+    size_t in_count{0}, out_count{0};
+};
+event_t zipit(sim_t& sim, zipit_stat_t& stat, size_t ident, inbox_t in, outbox_t out)
+{
+    merge_t zip(10);            // fixme latency
+
+    while (true) {
+        auto msg = (co_await in());
+
+        ++stat.in_count;
+        const double now = sim.now();
+        const auto debut = timepoint(now);
+        msg.debut = debut;
+        bool ok = zip.feed(msg);
+        if (!ok) {
+            std::cerr << "our ordering is broken\n";
+        }
+
+        std::vector<message_t> got;
+        zip.drain_prompt(std::back_inserter(got), debut);
+        for (const auto& one : got) {
+            co_await out(one);
+            ++stat.out_count;
+        }
+    }
+        
+}
 int main(int argc, char* argv[])
 {
     const merge_t::duration_t max_latency = std::chrono::microseconds(1000);
@@ -125,16 +169,31 @@ int main(int argc, char* argv[])
 
     simcpp20::simulation<> sim;
     auto s1 = std::make_shared<mqueue_t>(sim, buffer_size);
+    auto s2 = std::make_shared<mqueue_t>(sim, buffer_size);
 
     // mean period of TP generation in sim time (seconds);
     const double lifetime = 0.0001;
     std::default_random_engine rangen(123456);
     std::exponential_distribution<> expo(1.0/lifetime);
 
-    source(sim, 1, {s1}, {rangen, expo});
-
-    sink(sim, 1, {s1});
+    delay_t sdel{rangen, expo};
+    // delay_t tdel{rangen, expo};
+    
+    source_stat_t source_stat;
+    source(sim, source_stat, 1, {s1}, sdel);
+    // transfer_stat_t transfer_stat;
+    // transfer(sim, transfer_stat, 1, {s1}, {s2}, tdel);
+    zipit_stat_t zipit_stat;
+    zipit(sim, zipit_stat, 1, {s1}, {s2});
+    sink_stat_t sink_stat;
+    sink(sim, sink_stat, 1, {s2});
 
     sim.run_until(10);
+
+    std::cerr << source_stat.count << " -> "
+              // << transfer_stat.count << " -> "
+              << zipit_stat.in_count << "/"
+              << zipit_stat.out_count << " -> "
+              << sink_stat.count << "\n";
     return 0;
 }
