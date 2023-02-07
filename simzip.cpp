@@ -81,10 +81,25 @@ std::string make_key(const std::string& type, const std::string& name)
 }
 std::string make_key(const cfg_t& cfg)
 {
+    // std::cerr << "make_key: " << cfg << std::endl;
     std::string type = cfg["type"];
     std::string name = cfg.value("name","");
     return make_key(type, name);
 }
+
+std::string make_edge_key(const cfg_t& edge)
+{
+    const std::string tkey = edge["tail"]["node"];
+    const std::string hkey = edge["head"]["node"];
+
+    const size_t tind = edge["tail"]["port"];
+    const size_t hind = edge["head"]["port"];
+
+    std::stringstream ss;
+    ss << tkey << ":" << tind << "->" << hkey << ":" << hind;
+    return ss.str();
+}
+
 
 bool is_random(const cfg_t& cfg)
 {
@@ -97,16 +112,17 @@ bool is_service(const cfg_t& cfg)
 {
     return is_random(cfg);
 }
+bool is_edge(const cfg_t& cfg)
+{
+    if (cfg.contains("head") and cfg.contains("tail")) return true;
+    return false;
+}
 
-// shareable ports
-struct inbox_t {
-    std::shared_ptr<mqueue_t> inbox;
-    mqueue_t::pop_event_t operator()() { return inbox->pop(); }
-};
-struct outbox_t {
-    std::shared_ptr<mqueue_t> outbox;
-    mqueue_t::push_event_t operator()(message_t msg) { return outbox->push(msg); }
-};
+// A shareable ports.  A node must only pop on input ports and only
+// push on outputports.
+using port_t = std::shared_ptr<mqueue_t>;
+using ports_t = std::vector<port_t>;
+
 
 // Collect rand dists keep node functions brief, reuse engine.
 struct rando_t {
@@ -121,61 +137,130 @@ struct rando_expo_t : public rando_t {
 
     virtual double operator()() { return dist(rangen); }
 };
+struct rando_fixed_t : public rando_t {
+    double value;
+    rando_fixed_t(double v) : value(v) {}
+    virtual double operator()() { return value; }
+};
 struct rnd_t {
     using rando_ptr = std::shared_ptr<rando_t>;
     std::unordered_map<std::string, rando_ptr> dists;
     std::default_random_engine rangen;
 
-    rnd_t(size_t seed=123456) : rangen(seed) {}
+    rnd_t(size_t seed=123456) : rangen(seed)
+    {
+        dists["random:zeros"] = std::make_shared<rando_fixed_t>(0.0);
+    }
 
     rando_t& declare(const cfg_t& cfg) {
         std::string type = cfg["type"];
+        if (type != "random")
+        {
+            throw std::invalid_argument("not a rando: " + type);
+        }
+
         std::string name = cfg["name"];
+        std::string dtype = cfg["data"]["distribution"];
 
         auto key = make_key(type, name);
 
-        std::string distro = cfg["data"]["distribution"];
-        if (distro == "exponential") {
+        if (dtype == "exponential") {
             double lifetime = cfg["data"]["lifetime"];
             dists[key] = std::make_shared<rando_expo_t>(rangen, lifetime);
             return *dists[key];
         }
+        if (dtype == "fixed") {
+            double value = cfg["data"].value("value", 0.0);
+            dists[key] = std::make_shared<rando_fixed_t>(value);
+            return *dists[key];
+        }
+
         throw std::invalid_argument("unsupported distribution: " + key);
     }
-    rando_t& operator()(const std::string& type, const std::string& name) {
-        std::string key = make_key(type, name);
+    rando_t& operator()(const std::string& dtype, const std::string& name) {
+        std::string key = make_key(dtype, name);
         return (*this)(key);
     }
     rando_t& operator()(const std::string& key) {
-        return *dists[key];
+        auto got = dists.find(key);
+        if (got == dists.end()) {
+            throw std::invalid_argument("no rando at " + key);
+        }
+        return *(got->second);
     }
 };
 
 
-// Every pgraph node is a function which gets a "sim" and a "params".
-// The cfg value has type/name/data attributes from input.  Initially
-// "data" has type-specific config.  The function should agument
-// "data" with additional information (results, statistics).  The
-// "cfg" object will be saved to final output JSON.
-struct params_t {
+
+
+ports_t make_ports(sim_t& sim, const cfg_t& node, const std::string which)
+{
+    ports_t ret;
+
+    if (!node.contains("data")) return ret;
+    const auto& data = node["data"];
+
+    if (!data.contains(which)) return ret;
+    auto got = data[which];
+
+    if (got.is_null()) {
+        return ret;
+    }
+    if (got.is_number()) {
+        size_t capacity = got;
+        got = cfg_t::array({capacity});
+    }
+    for (const auto one : got) {
+        size_t capacity = one;
+        ret.push_back(std::make_shared<mqueue_t>(sim, capacity));
+    }
+    return ret;
+
+}
+
+// Model a pgraph node.
+struct pnode_t {
+
+    // The type/name/data object
     cfg_t cfg;
-    rnd_t rnd;
-    inbox_t ibox;
-    outbox_t obox;
+
+    // Vector of input and output ports.
+    ports_t iports, oports;
+
+    pnode_t() = default;
+
+    // Pnode owning ports
+    pnode_t(sim_t& sim, const cfg_t& cfg)
+        : cfg(cfg)
+        , iports(make_ports(sim, cfg, "ibox"))
+        , oports(make_ports(sim, cfg, "obox"))
+    {
+    }
+
+    // Pnode using other ports
+    pnode_t(const cfg_t& cfg,
+            ports_t iports, ports_t oports)
+        : cfg(cfg), iports(iports), oports(oports) {}
+            
 };
 
-// A pgraph node specifier
-using node_t = std::function<event_t(sim_t& sim, params_t& par)>;
+// Every pgraph node is a coroutine called like this.  The function
+// may modify pnode.cfg.
+using node_t = std::function<event_t(sim_t& sim, pnode_t& pnode, rnd_t& rnd)>;
 
 
-// A source that produces sequence of messages with delay.
-// configuration parameters:
-// - ident :: integer denoting a stream ID unique to any sibilings
+// A source that produces sequence of messages out all its ports.
+// Expect this in pnode.cfg["data"]:
 // - delay :: a random <distribution>:<name> for a delay 
-event_t source(sim_t& sim, params_t& par) 
+event_t source(sim_t& sim, pnode_t& pnode, rnd_t rnd) 
 {
-    auto& del = par.rnd(par.cfg["data"]["delay"]);
-    size_t ident = par.cfg["data"].value("ident", 0);
+    static size_t ident = 0;
+    ++ident;
+
+    // std::cerr << sim << "source: " << pnode.cfg << "\n";
+    auto delay = pnode.cfg["data"].value("delay", "fixed");
+    auto& del = rnd(delay);
+    // std::cerr << sim << "source: " << delay << "\n";
 
     size_t count = 0;
     while (true) {
@@ -193,48 +278,68 @@ event_t source(sim_t& sim, params_t& par)
 
         // This will block when outbox gets stuffed.  We could add
         // here a timeout + event abort to simulate loss.
-        co_await par.obox(msg);
+        for (auto& port : pnode.oports) {
+            co_await port->push(msg);
+        }
 
         // std::cerr << sim << ident << " -> " << msg << "\n";
         ++count;
-        par.cfg["count"] = count;
+        pnode.cfg["data"]["count"] = count;
     }
 }
     
-event_t sink(sim_t& sim, params_t& par)
+// A sink with a single input port
+event_t sink(sim_t& sim, pnode_t& pnode, rnd_t rnd)
 {
     size_t count = 0;
     while (true) {
-        co_await par.ibox();
+        auto msg = co_await pnode.iports[0]->pop();
         ++count;
-        par.cfg["count"] = count;
+        pnode.cfg["data"]["count"] = count;
+        pnode.cfg["data"]["last_seen"] = msg.identity;
     }
 }
 
-event_t transfer(sim_t& sim, params_t& par)
+// A transfer is a special node type that connects a tail port to a
+// head port.  It crudely models transport such as across TCP.
+// It's configuration is that of an EDGE
+event_t transfer(sim_t& sim, pnode_t& pnode, rnd_t rnd)
 {
-    auto& del = par.rnd(par.cfg["data"]["delay"]);
-    
+    // std::cerr << sim << "transfer: " << pnode.cfg << "\n";
+
+    std::string rando = pnode.cfg.value("delay","random:zeros");
+    auto& del = rnd(rando);
+
+    // std::cerr << sim << "transfer: trial delay: " << del() << "\n";
+
     size_t count = 0;
+
     while (true) {
-        auto msg = (co_await par.ibox());
-        co_await sim.timeout(del());
-        co_await par.obox(msg);
+
+        const double delay = del();
+
+        auto msg = (co_await pnode.iports[0]->pop());
+        co_await sim.timeout(delay);
+        co_await pnode.oports[0]->push(msg);
         ++count;
-        par.cfg["count"] = count;
+        pnode.cfg["data"]["count"] = count;
     }
 }
 
-event_t zipit(sim_t& sim, params_t& par)
+// A node running a zipper.  This has a single input and output port.
+event_t zipit(sim_t& sim, pnode_t& pnode, rnd_t rnd)
 {
-    size_t cardinality = par.cfg["data"].value("cardinality", 10);
-    merge_t::duration_t max_latency = timepoint(par.cfg["data"].value("max_latency", 0.0)).time_since_epoch();
+    static size_t ident = 0;
+    ++ident;
+
+    size_t cardinality = pnode.cfg["data"].value("cardinality", 10);
+    merge_t::duration_t max_latency = timepoint(pnode.cfg["data"].value("max_latency", 0.0)).time_since_epoch();
     merge_t zip(cardinality, max_latency);
 
     size_t in_count{0}, out_count{0};
 
     while (true) {
-        auto msg = (co_await par.ibox());
+        auto msg = (co_await pnode.iports[0]->pop());
 
         ++in_count;
         const double now = sim.now();
@@ -247,93 +352,120 @@ event_t zipit(sim_t& sim, params_t& par)
 
         std::vector<message_t> got;
         zip.drain_prompt(std::back_inserter(got), debut);
-        for (const auto& one : got) {
-            co_await par.obox(one);
+        for (auto one : got) {
+            one.identity = ident;
+            // fixme: reset debug
+            co_await pnode.oports[0]->push(one);
             ++out_count;
         }
 
-        par.cfg["in_count"] = in_count;
-        par.cfg["out_count"] = out_count;
+        pnode.cfg["in_count"] = in_count;
+        pnode.cfg["out_count"] = out_count;
     }        
 }
 
+struct pnode_store_t {
+    sim_t& sim;
 
+    using pnodes_t = std::unordered_map<std::string, pnode_t>;
+    pnodes_t store;
 
+    pnode_t& get(const std::string& key) 
+    {
+        return const_cast<pnode_t&>(const_cast<const pnode_store_t*>(this)->get(key));
+    }
+    const pnode_t& get(const std::string& key) const
+    {
+        auto got = store.find(key);
+        if (got == store.end()) {
+            throw std::invalid_argument("no such pnode: " + key);
+        }
+        return got->second;
+    }
 
+    // set a "regular" node, return its key
+    std::string set(const cfg_t& node)
+    {
+        auto key = make_key(node);
+        store.emplace(key, pnode_t(sim, node));
+        return key;
+    }
+
+    // set a special node representing an edge between regular nodes
+    std::string set_edge(const cfg_t& edge)
+    {
+        const std::string tkey = edge["tail"]["node"];
+        const std::string hkey = edge["head"]["node"];
+
+        auto tnode = get(tkey);
+        auto hnode = get(hkey);
+
+        const size_t tind = edge["tail"]["port"];
+        const size_t hind = edge["head"]["port"];
+
+        auto tport = tnode.oports.at(tind);
+        auto hport = hnode.iports.at(hind);
+
+        auto ekey = make_edge_key(edge);
+        
+        store.emplace(ekey, pnode_t(edge, {tport}, {hport}));
+
+        return ekey;
+    }
+};
 
 struct context_t
 {
+    simcpp20::simulation<> sim;
+
     using node_types_t = std::unordered_map<std::string, node_t>;
     node_types_t node_types = {
         {"source",source}, {"sink",sink}, {"transfer",transfer}, {"zipper",zipit}
     };
 
-    using param_store_t = std::unordered_map<std::string, params_t>;
-    param_store_t param_store;
-    
-    using edge_t = std::shared_ptr<mqueue_t>;
-    using boxes_t = std::unordered_map<std::string, edge_t>;
-    boxes_t inboxes, outboxes;
-
     cfg_t cfg;
     rnd_t rnd;
-    simcpp20::simulation<> sim;
 
-    edge_t outbox(const std::string& key)
-    {
-        auto got = outboxes.find(key);
-        if (got == outboxes.end()) {
-            static edge_t dummy;
-            return dummy;
-        }
-        return got->second;
-    }
-    edge_t inbox(const std::string& key)
-    {
-        auto got = inboxes.find(key);
-        if (got == inboxes.end()) {
-            static edge_t dummy;
-            return dummy;
-        }
-        return got->second;
-    }
+    pnode_store_t pnodes;
+
 
     context_t(const cfg_t& c)
         : cfg(c)
         , rnd(c["main"].value("seed", 123456))
+        , pnodes{sim}
     {
-        // Edge has tail/head/capacity
-        for (auto& edge : cfg["edges"]) {
-            uint64_t capacity = edge.value("capacity",1);
-            auto q = std::make_shared<mqueue_t>(sim, capacity);
-            outboxes[edge["tail"]["node"]] = q;
-            inboxes[edge["head"]["node"]] = q;
-        }
-
-        // Loop once looking for non-node configurations
+        // Loop once to dispatch non-node configurations or build
+        // ports and params for nodes.
         for (auto& node : cfg["nodes"]) {
             if (is_random(node)) {
                 rnd.declare(node);
                 continue;
             }
+            pnodes.set(node);
         }
 
-        // Loop again to make and execute nodes
+        // Link up edges
+        for (auto& edge : cfg["edges"])
+        {
+            auto ekey = pnodes.set_edge(edge);
+            auto& pnode = pnodes.get(ekey);
+
+            transfer(sim, pnode, rnd);
+                
+        }
+
+        // Loop again to execute nodes
         for (auto& node : cfg["nodes"]) {
             if (is_service(node)) {
                 continue;
             }
 
-            std::string type = node["type"];
-
-            std::string name = node.value("name","");
-            auto key = make_key(type, name);
-            param_store.emplace(key,params_t{node, rnd, inbox(key), outbox(key)});
+            auto& pnode = pnodes.get(make_key(node));
+            std::string type = pnode.cfg["type"];
             auto func = node_types[type];
 
             // Call coroutine
-            auto& param = param_store[key];
-            func(sim, param);
+            func(sim, pnode, rnd);
         }
     }
 
@@ -343,22 +475,32 @@ struct context_t
         sim.run_until(run_time);
     }
 
-    cfg_t state()
+    cfg_t state() const
     {
         cfg_t nodes = cfg_t::array();
         for (auto node : cfg["nodes"]) {
             if (is_service(node)) {
+                // "services" don't mutate their state
                 nodes.push_back(node);
                 continue;
-            }
+            } 
             auto key = make_key(node);
-            const auto& ncfg = param_store[key].cfg;
-            std::cerr << key << "\n" << ncfg << "\n";
-            node.update(ncfg, true);
+            const auto& pnode = pnodes.get(key);
+            node.update(pnode.cfg, true);
             nodes.push_back(node);
         }
+
+        cfg_t edges = cfg_t::array();
+        for (auto edge : cfg["edges"]) {
+            auto ekey = make_edge_key(edge);
+            const auto& enode = pnodes.get(ekey);
+            edge.update(enode.cfg, true);
+            edges.push_back(edge);
+        }
+
         cfg_t ret = cfg;
         ret["nodes"] = nodes;
+        ret["edges"] = edges;
         return ret;
     }
 
@@ -385,37 +527,5 @@ int main(int argc, char* argv[])
     std::ofstream out(ofname);
     out << std::setw(4) << ctx.state() << std::endl;
 
-    // const size_t buffer_size = 1000;
-
-    // simcpp20::simulation<> sim;
-    // auto s1 = std::make_shared<mqueue_t>(sim, buffer_size);
-    // auto s2 = std::make_shared<mqueue_t>(sim, buffer_size);
-
-    // // mean period of TP generation in sim time (seconds);
-    // const double lifetime = 0.0001;
-    // std::default_random_engine rangen(123456);
-    // std::exponential_distribution<> expo(1.0/lifetime);
-
-    // delay_t sdel{rangen, expo};
-    // // delay_t tdel{rangen, expo};
-    
-    // source_stat_t source_stat;
-    // if (true) {
-    //     source(sim, source_stat, 1, {s1}, sdel);
-    // }
-    // // transfer_stat_t transfer_stat;
-    // // transfer(sim, transfer_stat, 1, {s1}, {s2}, tdel);
-    // zipit_stat_t zipit_stat;
-    // zipit(sim, zipit_stat, 1, {s1}, {s2});
-    // sink_stat_t sink_stat;
-    // sink(sim, sink_stat, 1, {s2});
-
-    // sim.run_until(10);
-
-    // std::cerr << source_stat.count << " -> "
-    //           // << transfer_stat.count << " -> "
-    //           << zipit_stat.in_count << "/"
-    //           << zipit_stat.out_count << " -> "
-    //           << sink_stat.count << "\n";
     return 0;
 }

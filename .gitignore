@@ -9,3 +9,4 @@ test_cardinality
 .lock-waf*
 build
 simcpp20
+json
