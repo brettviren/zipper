@@ -51,23 +51,51 @@ local pg = import "pgraph.jsonnet";
     // Create a source configuration.  The name must be unique to all
     // sources, the delay is a rando.  The obox gives output port
     // spec.
-    source(name, delay, obox=1, params={}) :: pg.pnode({
+    source(ident, delay, obox=1, params={}) :: pg.pnode({
         type:"source",
-        name: name,
+        name: std.toString(ident),
         data:{
+            ident: ident,
             obox: obox,
             delay: pg.tn(delay),
         } + params,
     }, nin=0, nout=$.box_cardinality(obox), uses=[delay]),
 
-    sink(name, ibox=1, params = {}) :: pg.pnode({
+    // Create a sink configuration.  
+    sink(ident, ibox=1, params = {}) :: pg.pnode({
         type: "sink",
-        name: name,
+        name: std.toString(ident),
         data: {
+            ident: ident,
             ibox: ibox
         } + params,
     }, nin=1, nout=0),
 
+    // Create a zipit configuration.  
+    zipit(ident, cardinality=0, max_latency=0, params={}) :: pg.pnode({
+        type: "zipit",
+        name: std.toString(ident),
+        data: {
+            ident: ident,
+            ibox: 1,
+            obox: 1,
+            cardinality: cardinality,
+            max_latency: max_latency,
+        } + params,
+    }, nin=1, nout=1),
+
+    // Create a transfer configuration
+    transfer(ident, delay, params={}) :: pg.pnode({
+        type: "transfer",
+        name: std.toString(ident),
+        data: {
+            ident: ident,
+            ibox: 1,
+            obox: 1,
+            delay: pg.tn(delay),
+        } + params,
+    }, nin=1, nout=1, uses=[delay]),
+        
 }
     
         

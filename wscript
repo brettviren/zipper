@@ -56,8 +56,8 @@ def configure(cfg):
     print (cfg.env)
 
 def build(bld):
-    if 'HAVE_SIMCPP20' in bld.env:
-        bld(features='c cxx cxxprogram', use='SIMCPP20',
+    if 'HAVE_SIMCPP20' in bld.env and 'HAVE_JSON' in bld.env:
+        bld(features='c cxx cxxprogram', use='SIMCPP20 JSON',
             source="simzip.cpp", target="simzip")
         
     for stress in ("zipper","lossy"):

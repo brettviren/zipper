@@ -6,6 +6,9 @@
 
 #include "zipper.hpp"
 #include "simzip/util.hpp"
+#include "simzip/stats.hpp"
+
+#define JSON_DIAGNOSTICS 1
 #include "nlohmann/json.hpp"
 
 #include <iostream>
@@ -33,6 +36,7 @@ using sim_t = simcpp20::simulation<>;
 using mqueue_t = simzip::bufque<message_t>;
 
 using cfg_t = nlohmann::json;
+using namespace nlohmann::literals;
 
 
 std::ostream& operator<<(std::ostream& o, const message_t& m)
@@ -67,6 +71,69 @@ message_t::timepoint_t timepoint(double now)
     auto tdur = std::chrono::duration_cast<message_t::timepoint_t::duration>(ddur);
     return message_t::timepoint_t(tdur);
 }
+
+double timepoint(const message_t::timepoint_t& now)
+{
+    auto ddur = std::chrono::duration<double>(now.time_since_epoch());
+    return ddur.count();
+}
+
+
+
+// Keep track of message times in the context of a node.
+struct time_tracker_t
+{
+    sim_t& sim;
+
+    // The duration from when the message was created to when it was
+    // received by a node.
+    simzip::Stats wire;
+    // The duration from when a message was held by the node.
+    simzip::Stats held;
+
+    // Call after a co_await on pop.  This will set message debut time
+    // to simulation now().
+    void recv(message_t& m)
+    {
+        const double then = m.ordering * tick_period;
+        const double now = sim.now();        
+        wire(now-then);
+        m.debut = timepoint(now);
+    }
+
+    // Call just before a co_await on push.  This will set message
+    // debut time to simulation now().
+    void send(message_t& m)
+    {
+        const double then = timepoint(m.debut);
+        const double now = sim.now();        
+        held(now-then);
+        m.debut = timepoint(now);
+    }
+
+    // Dump stats as cfg obj
+    cfg_t stats(const simzip::Stats& stats) const
+    {
+        return cfg_t{
+            {"n", stats.S0}, {"mu", stats.mean()}, {"rms", stats.rms()},
+            {"str", stats.dump()}
+        };
+    }
+    // Dump self as cfg obj
+    cfg_t stats() const
+    {
+        return cfg_t{
+            {"wn", wire.S0},
+            {"wmu", wire.mean()},
+            {"wrms", wire.rms()},
+            {"wstr", wire.dump()},
+            {"hn", held.S0},
+            {"hmu", held.mean()},
+            {"hrms", held.rms()},
+            {"hstr", held.dump()},
+        };
+    }
+};
 
 
 std::string make_key(const std::string& type, const std::string& name)
@@ -235,6 +302,9 @@ struct pnode_t {
         , iports(make_ports(sim, cfg, "ibox"))
         , oports(make_ports(sim, cfg, "obox"))
     {
+        if (iports.empty() and oports.empty()) {
+            throw std::invalid_argument("no ports in node:" + cfg.dump());
+        }
     }
 
     // Pnode using other ports
@@ -249,54 +319,49 @@ struct pnode_t {
 using node_t = std::function<event_t(sim_t& sim, pnode_t& pnode, rnd_t& rnd)>;
 
 
-// A source that produces sequence of messages out all its ports.
+// A source that produces a sequence of messages its port.
 // Expect this in pnode.cfg["data"]:
 // - delay :: a random <distribution>:<name> for a delay 
 event_t source(sim_t& sim, pnode_t& pnode, rnd_t rnd) 
 {
-    static size_t ident = 0;
-    ++ident;
+    time_tracker_t tt{sim};
+    const size_t ident = pnode.cfg["/data/ident"_json_pointer];
 
     // std::cerr << sim << "source: " << pnode.cfg << "\n";
     auto delay = pnode.cfg["data"].value("delay", "fixed");
     auto& del = rnd(delay);
     // std::cerr << sim << "source: " << delay << "\n";
 
-    size_t count = 0;
     while (true) {
 
+        const double now = sim.now();        
+        const message_t::ordering_t ordering = now / tick_period;
+            
+        message_t msg{{}, ordering, ident, timepoint(now)};
+
+        /// we are source, recv times are meaningless
+        // tt.recv(msg);
+
+        // Now spend some "time" making the message
         const double delay = del();
         co_await sim.timeout(delay);
 
-        const double now = sim.now();
-        const auto debut = timepoint(now);
+        tt.send(msg);
+        co_await pnode.oports[0]->push(msg);
 
-        size_t ticks = now / tick_period;
-        message_t msg{{}, ticks, ident, debut};
-        // note, debut should be rewritten just prior to zipper to
-        // reflect delays from here to there.
-
-        // This will block when outbox gets stuffed.  We could add
-        // here a timeout + event abort to simulate loss.
-        for (auto& port : pnode.oports) {
-            co_await port->push(msg);
-        }
-
-        // std::cerr << sim << ident << " -> " << msg << "\n";
-        ++count;
-        pnode.cfg["data"]["count"] = count;
+        // Maybe do this every N calls if this ends up being slow.
+        pnode.cfg["data"].update(tt.stats());
     }
 }
     
 // A sink with a single input port
 event_t sink(sim_t& sim, pnode_t& pnode, rnd_t rnd)
 {
-    size_t count = 0;
+    time_tracker_t tt{sim};
     while (true) {
         auto msg = co_await pnode.iports[0]->pop();
-        ++count;
-        pnode.cfg["data"]["count"] = count;
-        pnode.cfg["data"]["last_seen"] = msg.identity;
+        tt.recv(msg);
+        pnode.cfg["data"].update(tt.stats());
     }
 }
 
@@ -305,62 +370,73 @@ event_t sink(sim_t& sim, pnode_t& pnode, rnd_t rnd)
 // It's configuration is that of an EDGE
 event_t transfer(sim_t& sim, pnode_t& pnode, rnd_t rnd)
 {
-    // std::cerr << sim << "transfer: " << pnode.cfg << "\n";
+    time_tracker_t tt{sim};
 
     std::string rando = pnode.cfg.value("delay","random:zeros");
     auto& del = rnd(rando);
-
-    // std::cerr << sim << "transfer: trial delay: " << del() << "\n";
-
-    size_t count = 0;
 
     while (true) {
 
         const double delay = del();
 
         auto msg = (co_await pnode.iports[0]->pop());
+        tt.recv(msg);
+
+        // simulate transmission delay
         co_await sim.timeout(delay);
+
+        tt.send(msg);
         co_await pnode.oports[0]->push(msg);
-        ++count;
-        pnode.cfg["data"]["count"] = count;
+
+        pnode.cfg["data"].update(tt.stats());
     }
 }
 
 // A node running a zipper.  This has a single input and output port.
 event_t zipit(sim_t& sim, pnode_t& pnode, rnd_t rnd)
 {
-    static size_t ident = 0;
-    ++ident;
+    time_tracker_t tt{sim};
 
-    size_t cardinality = pnode.cfg["data"].value("cardinality", 10);
-    merge_t::duration_t max_latency = timepoint(pnode.cfg["data"].value("max_latency", 0.0)).time_since_epoch();
+    const size_t ident = pnode.cfg["/data/ident"_json_pointer];
+    std::cerr << "zipper " << pnode.cfg["name"] << " ident=" << ident << "\n";
+
+    size_t cardinality = pnode.cfg.value("/data/cardinality"_json_pointer, 0);
+    pnode.cfg["/data/cardinality"_json_pointer] = cardinality;
+
+    double maxlat = pnode.cfg.value("/data/max_latency"_json_pointer, 0.0);
+    pnode.cfg["/data/max_latency"_json_pointer] = maxlat;
+    merge_t::duration_t max_latency = timepoint(maxlat).time_since_epoch();
     merge_t zip(cardinality, max_latency);
-
-    size_t in_count{0}, out_count{0};
 
     while (true) {
         auto msg = (co_await pnode.iports[0]->pop());
+        tt.recv(msg);
 
-        ++in_count;
-        const double now = sim.now();
-        const auto debut = timepoint(now);
-        msg.debut = debut;
+        const auto debut = msg.debut;
+
         bool ok = zip.feed(msg);
         if (!ok) {
             std::cerr << "our ordering is broken\n";
         }
 
+        std::cerr << "pre feed stream="<< msg.identity << " to "<< pnode.cfg["name"]
+                  << ": ident=" << ident << " cardinality=" << cardinality << " maxlat=" << maxlat
+                  << " size=" << zip.size() << " complete=" << zip.complete() << "\n";
+
         std::vector<message_t> got;
-        zip.drain_prompt(std::back_inserter(got), debut);
+        if (maxlat > 0) {
+            zip.drain_prompt(std::back_inserter(got), debut);
+        }
+        else {
+            zip.drain_waiting(std::back_inserter(got));
+        }
         for (auto one : got) {
             one.identity = ident;
-            // fixme: reset debug
-            co_await pnode.oports[0]->push(one);
-            ++out_count;
-        }
 
-        pnode.cfg["in_count"] = in_count;
-        pnode.cfg["out_count"] = out_count;
+            tt.send(one);
+            co_await pnode.oports[0]->push(one);
+        }
+        pnode.cfg["data"].update(tt.stats());
     }        
 }
 
@@ -394,15 +470,22 @@ struct pnode_store_t {
     // set a special node representing an edge between regular nodes
     std::string set_edge(const cfg_t& edge)
     {
-        const std::string tkey = edge["tail"]["node"];
-        const std::string hkey = edge["head"]["node"];
+        // std::cerr << edge << "\n";
+        const std::string tkey = edge.at("/tail/node"_json_pointer);
+        const std::string hkey = edge.at("/head/node"_json_pointer);
 
         auto tnode = get(tkey);
         auto hnode = get(hkey);
 
-        const size_t tind = edge["tail"]["port"];
-        const size_t hind = edge["head"]["port"];
+        const size_t tind = edge.at("/tail/port"_json_pointer);
+        const size_t hind = edge.at("/head/port"_json_pointer);
 
+        if (tind >= tnode.oports.size() or hind >= hnode.iports.size()) {
+            throw std::invalid_argument("port out of bounds for edge:"
+                                        +edge.dump()+" tail:"
+                                        +tnode.cfg.dump()+" head:"
+                                        +hnode.cfg.dump());
+        }
         auto tport = tnode.oports.at(tind);
         auto hport = hnode.iports.at(hind);
 
@@ -414,14 +497,24 @@ struct pnode_store_t {
     }
 };
 
+struct node_types_t {
+    std::unordered_map<std::string, node_t> types = {    
+        {"source",source}, {"sink",sink}, {"transfer",transfer}, {"zipit",zipit}
+    };
+    node_t operator()(const std::string& type) const {
+        auto it = types.find(type);
+        if (it == types.end()) {
+            throw std::invalid_argument("no such node type: " + type);
+        }
+        return it->second;
+    }
+};
+
 struct context_t
 {
     simcpp20::simulation<> sim;
 
-    using node_types_t = std::unordered_map<std::string, node_t>;
-    node_types_t node_types = {
-        {"source",source}, {"sink",sink}, {"transfer",transfer}, {"zipper",zipit}
-    };
+    node_types_t node_types;
 
     cfg_t cfg;
     rnd_t rnd;
@@ -431,7 +524,7 @@ struct context_t
 
     context_t(const cfg_t& c)
         : cfg(c)
-        , rnd(c["main"].value("seed", 123456))
+        , rnd(c.value("/main/seed"_json_pointer, 123456))
         , pnodes{sim}
     {
         // Loop once to dispatch non-node configurations or build
@@ -462,7 +555,7 @@ struct context_t
 
             auto& pnode = pnodes.get(make_key(node));
             std::string type = pnode.cfg["type"];
-            auto func = node_types[type];
+            auto func = node_types(type);
 
             // Call coroutine
             func(sim, pnode, rnd);
@@ -471,7 +564,7 @@ struct context_t
 
     void run()
     {
-        double run_time = cfg["main"].value("run_time", 1.0);
+        double run_time = cfg.value("/main/run_time"_json_pointer, 1.0);
         sim.run_until(run_time);
     }
 
@@ -504,6 +597,23 @@ struct context_t
         return ret;
     }
 
+    std::string summary() const
+    {
+        std::stringstream ss;
+        for (auto node : cfg["nodes"]) {
+            if (is_service(node)) {
+                continue;
+            } 
+
+            auto key = make_key(node);
+            const auto& pnode = pnodes.get(key);
+            auto cfg = pnode.cfg;
+            ss << key << "\n"
+               << "\twire: " << cfg["/data/wstr"_json_pointer] << "\n"
+               << "\theld: " << cfg["/data/hstr"_json_pointer] << "\n";
+        }
+        return ss.str();
+    }
 };
 
 
@@ -526,6 +636,8 @@ int main(int argc, char* argv[])
 
     std::ofstream out(ofname);
     out << std::setw(4) << ctx.state() << std::endl;
+
+    std::cerr << ctx.summary() << std::endl;
 
     return 0;
 }

@@ -10,3 +10,7 @@ test_cardinality
 build
 simcpp20
 json
+*.json
+*.log
+*.dot
+*.pdf
