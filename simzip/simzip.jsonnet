@@ -20,6 +20,10 @@ local pg = import "pgraph.jsonnet";
         // An exponential distribution
         exponential(name, lifetime) :: 
             self.distribution("exponential", name, {lifetime:lifetime}),
+        uniint(name, vmin, vmax) :: 
+            self.distribution("uniint", name, {vmin:vmin, vmax:vmax}),
+        unireal(name, vmin, vmax) :: 
+            self.distribution("unireal", name, {vmin:vmin, vmax:vmax}),
 
         // A fixed point distribution
         fixed(name, value=0) :: 
@@ -96,6 +100,18 @@ local pg = import "pgraph.jsonnet";
         } + params,
     }, nin=1, nout=1, uses=[delay]),
         
+    coherent(ident, streams, start, span, params={}) :: pg.pnode({
+        type: "coherent",
+        name: std.toString(ident),
+        data: {
+            streams: streams,
+            ibox: 1,
+            obox: [1 for dummy in streams],
+            start: pg.tn(start),
+            span: pg.tn(span),
+        }
+    }, nin=1, nout=std.length(streams), uses=[span, start]),
+            
 }
     
         

@@ -60,10 +60,10 @@ def build(bld):
         bld(features='c cxx cxxprogram', use='SIMCPP20 JSON',
             source="simzip.cpp", target="simzip")
         
-    for stress in ("zipper","lossy"):
-        name = f'stress_{stress}'
+    for ssrc in bld.path.ant_glob("stress/stress_*.cpp"):
+        name = ssrc.name.replace(".cpp","")
         bld(features='cxx cxxprogram',
-            source=f'{name}.cpp', target=name)
+            source=[ssrc], target=name)
 
     for tsrc in bld.path.ant_glob("test/test_*.cpp"):
         name = tsrc.name.replace(".cpp","")

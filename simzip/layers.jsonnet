@@ -38,8 +38,9 @@ local fanin(head, tails, capacity=1) =
 // - count :: number of "tail" children nodes in the layer connected
 // to a single "head" node in the previous layer.
 //
-// - generator :: a function taking an name to use to construct a
-// pnode to serve as a "tail".
+// - generator :: a function taking an "ident" number that is opaque
+// but unique to the node in the entire graph.  It must return the
+// coresponding pnode.
 
 local node_id(path) = 
     std.parseInt(std.join("", [std.toString(i+1) for i in path]));
@@ -59,30 +60,55 @@ local hierarchy_layer(top, layers, layer=0, path=[]) =
             fanin(top, [hierarchy_layer(children[index], layers[1:], layer+1, path+[index]) for index in std.range(0,l.count-1)]);
 
         
-local make_simple_gen(tname, data={}) =
-    function(ident) pg.pnode({ type:tname, name:std.toString(ident), data:data }, nin=1, nout=1);
 
 local layer_node_name(layer, pre) = std.toString(layer) + "-" + pre;
 
 // Map a type name to a function producing a layer generator of nodes of that type.  The function takes a layer_number used to assure unique naming when multiple layers may have same type.
 local layer_generators = {
     source(delay, obox=1, params={}) :: function(ident)
-        sz.source(ident, delay, obox, params),
+        sz.source(ident, delay, obox, {stream:ident} + params),
     sink(ibox=1, params={}) :: function(ident)
         sz.sink(ident, ibox, params),
     zipit(cardinality=0, max_latency=0, params={}) :: function(ident)
-        sz.zipit(ident, cardinality, max_latency, params),
+        sz.zipit(ident, cardinality, max_latency, {stream:ident}+params),
     transfer(delay, params={}) :: function(ident)
         sz.transfer(ident, delay, params),
+    coherent(streams, start, span, params={}) :: function(ident)
+        sz.coherent(ident, streams, start, span, params),
 };
 
 local simple_sink = pg.pnode({type:"sink", name:"", data:{ ibox:1 }}, nin=1, nout=0);
 
+
+
+// local pdsp = hierarchy_layer(simple_sink, [
+//         {count:2, generator:layer_generators.source(sz.rando.exponential("delay",1.0))}
+    
+
+
+
+local cohsrcgen(ident) = 
+    local streams = std.range(0,9);
+    local cap = layer_generators.zipit(10)(ident);
+    local zips = [layer_generators.zipit(2)(ident*10+ind)
+                  for ind in streams];
+    local srcs = [layer_generators.source(sz.rando.exponential("cohdelay",1.0))(ident*10+ind)
+                  for ind in streams];
+    local cohfan = layer_generators.coherent(std.range(0,9),
+                                             sz.rando.uniint("cohstart", 0, 9),
+                                             sz.rando.fixed("cohspan", 2)
+                                            )(ident);
+    local cohnoi = layer_generators.source(sz.rando.exponential("srcdelay",1.0))(ident);
+    local final = pg.intern(outnodes=[cap],
+                            centernodes=[cohfan, cohnoi]+srcs+zips,
+                            edges = [pg.edge(zips[ind], cap) for ind in streams] +
+                                    [pg.edge(srcs[ind], zips[ind]) for ind in streams] +
+                                    [pg.edge(cohfan,    zips[ind], ind,0) for ind in streams] +
+                                    [pg.edge(cohnoi, cohfan)]);
+    final;
+
 // fixme: move the layer number into hierarchy_layer() passing it to the generator.
 local test_scenarios = {
-    onetwo : hierarchy_layer(simple_sink, [
-        {count:2, generator:make_simple_gen("one")},
-        {count:2, generator:make_simple_gen("two")}]),
 
     sourcesink : hierarchy_layer(simple_sink, [
         {count:2, generator:layer_generators.zipit(3)},
@@ -95,6 +121,11 @@ local test_scenarios = {
         {count:1, generator:layer_generators.transfer(sz.rando.exponential("delay", 1.0))},
         {count:2, generator:layer_generators.source(sz.rando.exponential("delay",1.0))}
     ]),
+
+    apa : hierarchy_layer(simple_sink, [
+        {count:1, generator:cohsrcgen}
+    ]),
+        
 };
 
 // function (cardinality=1) 
@@ -106,3 +137,5 @@ local test_scenarios = {
 function(scenario="onetwo")
     pg.graph(test_scenarios[scenario])
     
+// pg.graph(cohsrcgen(101))
+// test_scenarios.apa

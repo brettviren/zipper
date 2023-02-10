@@ -80,16 +80,19 @@ double timepoint(const message_t::timepoint_t& now)
 
 
 
-// Keep track of message times in the context of a node.
+// Keep track of message times in the context of a node and modify
+// messages for receiving and sending.
 struct time_tracker_t
 {
     sim_t& sim;
+    cfg_t& cfg;
 
     // The duration from when the message was created to when it was
     // received by a node.
-    simzip::Stats wire;
-    // The duration from when a message was held by the node.
-    simzip::Stats held;
+    simzip::Stats recved;
+    // The duration from when a message created to when it was sent by
+    // the node.
+    simzip::Stats sended;
 
     // Call after a co_await on pop.  This will set message debut time
     // to simulation now().
@@ -97,7 +100,7 @@ struct time_tracker_t
     {
         const double then = m.ordering * tick_period;
         const double now = sim.now();        
-        wire(now-then);
+        recved(now-then);
         m.debut = timepoint(now);
     }
 
@@ -107,8 +110,13 @@ struct time_tracker_t
     {
         const double then = timepoint(m.debut);
         const double now = sim.now();        
-        held(now-then);
+        sended(now-then);
         m.debut = timepoint(now);
+        
+        size_t ident = cfg.value("/data/ident"_json_pointer, 0);
+        if (ident) {
+            m.identity = ident;
+        }
     }
 
     // Dump stats as cfg obj
@@ -123,15 +131,22 @@ struct time_tracker_t
     cfg_t stats() const
     {
         return cfg_t{
-            {"wn", wire.S0},
-            {"wmu", wire.mean()},
-            {"wrms", wire.rms()},
-            {"wstr", wire.dump()},
-            {"hn", held.S0},
-            {"hmu", held.mean()},
-            {"hrms", held.rms()},
-            {"hstr", held.dump()},
+            {"Rn",   recved.S0},
+            {"Rmu",  recved.mean()},
+            {"Rrms", recved.rms()},
+            {"Rstr", recved.dump()},
+            {"Sn",   sended.S0},
+            {"Smu",  sended.mean()},
+            {"Srms", sended.rms()},
+            {"Sstr", sended.dump()},
         };
+    }
+
+    // Update cfg with stats.  fixme: maybe do no-op except for XX% of
+    // the calls to speed up running?
+    void update()
+    {
+        cfg["data"].update(stats());
     }
 };
 
@@ -204,6 +219,25 @@ struct rando_expo_t : public rando_t {
 
     virtual double operator()() { return dist(rangen); }
 };
+struct rando_uniint_t : public rando_t {
+    std::default_random_engine& rangen;
+    std::uniform_int_distribution<> dist;
+    rando_uniint_t(std::default_random_engine& r, int a, int b)
+        : rangen(r)
+        , dist(a,b) {}
+
+    // Caller should cast to int.
+    virtual double operator()() { return dist(rangen); }
+};
+struct rando_unireal_t : public rando_t {
+    std::default_random_engine& rangen;
+    std::uniform_real_distribution<> dist;
+    rando_unireal_t(std::default_random_engine& r, double a, double b)
+        : rangen(r)
+        , dist(a,b) {}
+
+    virtual double operator()() { return dist(rangen); }
+};
 struct rando_fixed_t : public rando_t {
     double value;
     rando_fixed_t(double v) : value(v) {}
@@ -234,6 +268,18 @@ struct rnd_t {
         if (dtype == "exponential") {
             double lifetime = cfg["data"]["lifetime"];
             dists[key] = std::make_shared<rando_expo_t>(rangen, lifetime);
+            return *dists[key];
+        }
+        if (dtype == "uniint") {
+            int a = cfg["/data/vmin"_json_pointer];
+            int b = cfg["/data/vmax"_json_pointer];
+            dists[key] = std::make_shared<rando_uniint_t>(rangen, a,b);
+            return *dists[key];
+        }
+        if (dtype == "unireal") {
+            double a = cfg["/data/vmin"_json_pointer];
+            double b = cfg["/data/vmax"_json_pointer];
+            dists[key] = std::make_shared<rando_unireal_t>(rangen, a,b);
             return *dists[key];
         }
         if (dtype == "fixed") {
@@ -324,8 +370,7 @@ using node_t = std::function<event_t(sim_t& sim, pnode_t& pnode, rnd_t& rnd)>;
 // - delay :: a random <distribution>:<name> for a delay 
 event_t source(sim_t& sim, pnode_t& pnode, rnd_t rnd) 
 {
-    time_tracker_t tt{sim};
-    const size_t ident = pnode.cfg["/data/ident"_json_pointer];
+    time_tracker_t tt{sim, pnode.cfg};
 
     // std::cerr << sim << "source: " << pnode.cfg << "\n";
     auto delay = pnode.cfg["data"].value("delay", "fixed");
@@ -337,7 +382,7 @@ event_t source(sim_t& sim, pnode_t& pnode, rnd_t rnd)
         const double now = sim.now();        
         const message_t::ordering_t ordering = now / tick_period;
             
-        message_t msg{{}, ordering, ident, timepoint(now)};
+        message_t msg{{}, ordering, 0, timepoint(now)};
 
         /// we are source, recv times are meaningless
         // tt.recv(msg);
@@ -349,19 +394,65 @@ event_t source(sim_t& sim, pnode_t& pnode, rnd_t rnd)
         tt.send(msg);
         co_await pnode.oports[0]->push(msg);
 
-        // Maybe do this every N calls if this ends up being slow.
-        pnode.cfg["data"].update(tt.stats());
+        tt.update();
     }
 }
     
-// A sink with a single input port
-event_t sink(sim_t& sim, pnode_t& pnode, rnd_t rnd)
+// A coherent pseudo-source.  Each received messages is sent 
+// number of times.  Each sent message is made unique with one
+// identity in a configured sequence "streams".
+// 
+// The number of consecutive streams to which messages are sent is
+// determined by a draw of the "span" rando and the first stream is
+// given by a draw of the "start" rando.
+event_t coherent(sim_t& sim, pnode_t& pnode, rnd_t rnd) 
 {
-    time_tracker_t tt{sim};
+    time_tracker_t tt{sim, pnode.cfg};
+
+    auto& rstart = rnd(pnode.cfg["/data/start"_json_pointer]);
+    auto& rspan = rnd(pnode.cfg["/data/span"_json_pointer]);
+
+    const std::vector<size_t> streams = pnode.cfg["/data/streams"_json_pointer];
+    const size_t nstreams = streams.size();
+    if (nstreams != pnode.oports.size()) {
+        throw std::invalid_argument("stream and port count do not match");
+    }
+
     while (true) {
         auto msg = co_await pnode.iports[0]->pop();
         tt.recv(msg);
-        pnode.cfg["data"].update(tt.stats());
+
+        // half-protect against broken user input
+        size_t beg = std::min((size_t)rstart(), nstreams-1);
+        size_t end = std::min(beg+(size_t)rspan(), nstreams);
+        
+        std::cerr << "coher:" << pnode.cfg["name"] << " recv:"
+                  << " stream=" << msg.identity
+                  << " order=" << msg.ordering
+                  << " span:["<<beg<<","<<end<<"]"
+                  << "\n";
+
+        while (beg < end) {
+            auto copy = msg;
+            tt.send(copy);
+            copy.identity = streams[beg];
+            co_await pnode.oports[beg]->push(copy);
+            ++beg;
+        }        
+
+        tt.update();
+    }
+}
+
+// A sink with a single input port
+event_t sink(sim_t& sim, pnode_t& pnode, rnd_t rnd)
+{
+    time_tracker_t tt{sim, pnode.cfg};
+    while (true) {
+        auto msg = co_await pnode.iports[0]->pop();
+        tt.recv(msg);
+
+        tt.update();
     }
 }
 
@@ -370,7 +461,7 @@ event_t sink(sim_t& sim, pnode_t& pnode, rnd_t rnd)
 // It's configuration is that of an EDGE
 event_t transfer(sim_t& sim, pnode_t& pnode, rnd_t rnd)
 {
-    time_tracker_t tt{sim};
+    time_tracker_t tt{sim, pnode.cfg};
 
     std::string rando = pnode.cfg.value("delay","random:zeros");
     auto& del = rnd(rando);
@@ -388,17 +479,14 @@ event_t transfer(sim_t& sim, pnode_t& pnode, rnd_t rnd)
         tt.send(msg);
         co_await pnode.oports[0]->push(msg);
 
-        pnode.cfg["data"].update(tt.stats());
+        tt.update();
     }
 }
 
 // A node running a zipper.  This has a single input and output port.
 event_t zipit(sim_t& sim, pnode_t& pnode, rnd_t rnd)
 {
-    time_tracker_t tt{sim};
-
-    const size_t ident = pnode.cfg["/data/ident"_json_pointer];
-    std::cerr << "zipper " << pnode.cfg["name"] << " ident=" << ident << "\n";
+    time_tracker_t tt{sim, pnode.cfg};
 
     size_t cardinality = pnode.cfg.value("/data/cardinality"_json_pointer, 0);
     pnode.cfg["/data/cardinality"_json_pointer] = cardinality;
@@ -414,14 +502,19 @@ event_t zipit(sim_t& sim, pnode_t& pnode, rnd_t rnd)
 
         const auto debut = msg.debut;
 
+        std::cerr << "zipit:" << pnode.cfg["name"] << " recv:"
+                  << " stream=" << msg.identity
+                  << " order=" << msg.ordering
+                  << " size=" << zip.size() 
+                  << "\n";
         bool ok = zip.feed(msg);
         if (!ok) {
             std::cerr << "our ordering is broken\n";
         }
 
-        std::cerr << "pre feed stream="<< msg.identity << " to "<< pnode.cfg["name"]
-                  << ": ident=" << ident << " cardinality=" << cardinality << " maxlat=" << maxlat
-                  << " size=" << zip.size() << " complete=" << zip.complete() << "\n";
+        // std::cerr << "pre feed stream="<< msg.identity << " to "<< pnode.cfg["name"]
+        //           << ": ident=" << ident << " cardinality=" << cardinality << " maxlat=" << maxlat
+        //           << " size=" << zip.size() << " complete=" << zip.complete() << "\n";
 
         std::vector<message_t> got;
         if (maxlat > 0) {
@@ -431,12 +524,19 @@ event_t zipit(sim_t& sim, pnode_t& pnode, rnd_t rnd)
             zip.drain_waiting(std::back_inserter(got));
         }
         for (auto one : got) {
-            one.identity = ident;
-
             tt.send(one);
+
+            std::cerr << "zipit:" << pnode.cfg["name"] << " send:"
+                      << " stream=" << msg.identity
+                      << " order=" << msg.ordering
+                      << " size=" << zip.size() 
+                      << "\n";
             co_await pnode.oports[0]->push(one);
         }
-        pnode.cfg["data"].update(tt.stats());
+
+        tt.update();
+        pnode.cfg["/data/zipsize"_json_pointer] = zip.size();
+        pnode.cfg["/data/zipcomplete"_json_pointer] = zip.complete();
     }        
 }
 
@@ -499,7 +599,7 @@ struct pnode_store_t {
 
 struct node_types_t {
     std::unordered_map<std::string, node_t> types = {    
-        {"source",source}, {"sink",sink}, {"transfer",transfer}, {"zipit",zipit}
+        {"source",source}, {"sink",sink}, {"transfer",transfer}, {"zipit",zipit}, {"coherent", coherent}
     };
     node_t operator()(const std::string& type) const {
         auto it = types.find(type);
@@ -609,8 +709,8 @@ struct context_t
             const auto& pnode = pnodes.get(key);
             auto cfg = pnode.cfg;
             ss << key << "\n"
-               << "\twire: " << cfg["/data/wstr"_json_pointer] << "\n"
-               << "\theld: " << cfg["/data/hstr"_json_pointer] << "\n";
+               << "\trecved: " << cfg["/data/Rstr"_json_pointer] << "\n"
+               << "\tsended: " << cfg["/data/Sstr"_json_pointer] << "\n";
         }
         return ss.str();
     }
