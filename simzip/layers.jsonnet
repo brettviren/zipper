@@ -67,6 +67,8 @@ local layer_node_name(layer, pre) = std.toString(layer) + "-" + pre;
 local layer_generators = {
     source(delay, obox=1, params={}) :: function(ident)
         sz.source(ident, delay, obox, {stream:ident} + params),
+    burst(delay, count, obox=1, params={}) :: function(ident)
+        sz.burst(ident, delay, count, obox, {stream:ident} + params),
     sink(ibox=1, params={}) :: function(ident)
         sz.sink(ident, ibox, params),
     zipit(cardinality=0, max_latency=0, params={}) :: function(ident)
@@ -85,7 +87,10 @@ local simple_sink = pg.pnode({type:"sink", name:"", data:{ ibox:1 }}, nin=1, nou
 //         {count:2, generator:layer_generators.source(sz.rando.exponential("delay",1.0))}
     
 
-
+// Generate messages that are coherent across different adjacent
+// output streams and use zippers to bring them together with
+// incoherent sources.  It's a bit "weird" as coherent noise would
+// subject zipper to same-time/same-stream input.
 
 local cohsrcgen(ident) = 
     local streams = std.range(0,9);
@@ -107,6 +112,14 @@ local cohsrcgen(ident) =
                                     [pg.edge(cohnoi, cohfan)]);
     final;
 
+local second = 1.0;
+local millisecond = second/1000.0;
+local microsecond = second/1000000.0;
+
+local per_face_ardk_period = 2.2e-5 * second;
+//local per_face_ardk_period = 1e-6 * second; // testing
+local tp_zipper_maxlat = 100 * microsecond;
+
 // fixme: move the layer number into hierarchy_layer() passing it to the generator.
 local test_scenarios = {
 
@@ -122,10 +135,16 @@ local test_scenarios = {
         {count:2, generator:layer_generators.source(sz.rando.exponential("delay",1.0))}
     ]),
 
-    apa : hierarchy_layer(simple_sink, [
+    cohsrc : hierarchy_layer(simple_sink, [
         {count:1, generator:cohsrcgen}
     ]),
         
+    aparad : hierarchy_layer(simple_sink, [
+        {count: 1, generator:layer_generators.zipit(10, tp_zipper_maxlat)}, // zip 10 links to one
+        {count: 10, generator:layer_generators.transfer(sz.rando.exponential("transfer_delay", 1.0))},
+        // (1.0 becquerel / kg )  * 10 kiloton / 200 -> 45 kHz / 2.2e-5 second
+        {count: 1, generator:layer_generators.burst(sz.rando.exponential("decay_delay", per_face_ardk_period),
+                                                    sz.rando.uniint("burst_count", 1, 10))}]),
 };
 
 // function (cardinality=1) 

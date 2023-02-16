@@ -14,3 +14,11 @@ json
 *.log
 *.dot
 *.pdf
+*.png
+*.svg
+*.dot
+*.pdf
+*.egg-info
+__pycache__
+.direnv
+.envrc

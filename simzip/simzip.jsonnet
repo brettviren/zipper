@@ -65,6 +65,20 @@ local pg = import "pgraph.jsonnet";
         } + params,
     }, nin=0, nout=$.box_cardinality(obox), uses=[delay]),
 
+    // Like source() but also give a count rando for number of message
+    // to burst at same time.
+    burst(ident, delay, count, obox=1, params={}) :: pg.pnode({
+        type:"burst",
+        name: std.toString(ident),
+        data:{
+            ident: ident,
+            obox: obox,
+            delay: pg.tn(delay),
+            count: pg.tn(count),
+        } + params,
+
+    }, nin=0, nout=$.box_cardinality(obox), uses=[delay, count]),
+
     // Create a sink configuration.  
     sink(ident, ibox=1, params = {}) :: pg.pnode({
         type: "sink",
