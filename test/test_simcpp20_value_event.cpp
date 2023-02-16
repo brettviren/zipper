@@ -90,7 +90,8 @@ any_of(simcpp20::simulation<>& sim, std::vector<simcpp20::value_event<ValueType>
 
     for (const auto &ve : ves) {
         ve.add_callback(
-            [any_of_ve, ve](const auto & other) mutable { any_of_ve.trigger(ve.value()); });
+            [any_of_ve, ve](const auto & other) mutable {
+                any_of_ve.trigger(ve.value()); });
     }
 
     return any_of_ve;
@@ -107,7 +108,9 @@ simcpp20::event<> consumer2(simcpp20::simulation<> &sim)
     //                                   sim.timeout<message_t>(2,msg2)};
     // auto got = co_await any_of(sim, evs) ;
     // auto got = co_await either(sim, sim.timeout(1), sim.timeout(2,msg)); 
-    auto got = co_await any_of<message_t>(sim, {sim.timeout<message_t>(1,msg1), sim.timeout<message_t>(2,msg2)});
+    std::vector<value_event_t> ve = {sim.timeout<message_t>(1,msg1),
+                                     sim.timeout<message_t>(2,msg2)};
+    auto got = co_await any_of<message_t>(sim,ve);
     std::cerr << "consumer2: " << got << std::endl;
 }
 

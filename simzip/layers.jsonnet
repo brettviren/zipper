@@ -153,7 +153,7 @@ local test_scenarios = {
 //     srcs: sources(all_params.sources, std.range(0,8))
 
 // }
-function(scenario="onetwo")
+function(scenario="aparad")
     pg.graph(test_scenarios[scenario])
     
 // pg.graph(cohsrcgen(101))

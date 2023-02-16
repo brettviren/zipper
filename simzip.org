@@ -1,0 +1,44 @@
+#+title: zipper simzip
+
+* Overview
+
+~simzip~ is a discrete event simulation which may be used to exercise
+the zipper and test out different scenarios.  
+
+* Requirements
+
+- C++-20 compiler with coroutine support
+  - g++ 10 is likely inadequate, tested with g++ 12.2
+- ~nlohmann/json~
+- ~fschuetz04/simcpp20~
+- Jsonnet compiler to use the provided configuration
+- Python with Numpy/Matplotlib/Click to plot results
+
+* Installation
+
+C++ ~simzip~ executable:
+
+#+begin_example
+ $ git clone https://github.com/fschuetz04/simcpp20.git
+ $ git clone https://github.com/nlohmann/json.git
+ $ waf configure \
+      --fschuetz04-simcpp20-include=simcpp20/include \
+      --nlohmann-json-include=json/include 
+ $ waf 
+#+end_example
+
+Python with ~direnv~ (other methods possible
+
+#+begin_example
+ $ echo layout python > .envrc
+ $ direnv allow
+ $ pip install -e .
+ $ zipit -h
+#+end_example
+
+* Running
+
+#+begin_example
+ $ jsonnet simzip/layers.jsonnet | ./build/simzip > out.json
+ $ zipit graph-plots -o out.pdf -f svg out.json
+#+end_example

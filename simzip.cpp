@@ -254,7 +254,7 @@ ports_t make_ports(sim_t& sim, const cfg_t& node, const std::string which)
         size_t capacity = got;
         got = cfg_t::array({capacity});
     }
-    for (const auto one : got) {
+    for (const auto& one : got) {
         size_t capacity = one;
         ret.push_back(std::make_shared<mqueue_t>(sim, capacity));
     }
