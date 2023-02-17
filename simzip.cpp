@@ -8,7 +8,7 @@
 #include "simzip/util.hpp"
 #include "simzip/stats.hpp"
 
-#define JSON_DIAGNOSTICS 1
+// #define JSON_DIAGNOSTICS 1
 #include "nlohmann/json.hpp"
 
 #include <iostream>
@@ -35,6 +35,7 @@ using merge_t = zipper::merge<message_t>;
 using event_t = simcpp20::event<>;
 using sim_t = simcpp20::simulation<>;
 using mqueue_t = simzip::bufque<message_t>;
+using message_event_t = simcpp20::value_event<message_t>;
 
 using cfg_t = nlohmann::json;
 using namespace nlohmann::literals;
@@ -512,39 +513,40 @@ event_t zipit(node_t& ctx)
     merge_t zip(cardinality, max_latency);
 
     while (true) {
-        // message_t msg;
-        // if (maxlat > 0.0) {
-        //     msg = co_await (ctx.iports[0]->pop() | ctx.sim.timeout<message_t>(maxlat, msg));
-        // }
-        // else {
-        //     msg = (co_await ctx.iports[0]->pop());
-        // }
-
-        // This makes inflates apparent max latency as we must wait on
-        // input.  Need a way to do any_of() with value events.
-        auto msg = (co_await ctx.iports[0]->pop());
-        ctx.recv(msg);
-
-        const auto debut = msg.debut;
-
-        // std::cerr << "zipit:" << ctx.cfg["name"] << " recv:"
-        //           << " stream=" << msg.identity
-        //           << " order=" << msg.ordering
-        //           << " size=" << zip.size() 
-        //           << "\n";
-
-        bool ok = zip.feed(msg);
-        if (!ok) {
-            std::cerr << "our ordering is broken\n";
+        message_t msg;
+        if (maxlat > 0.0) {
+            std::vector<message_event_t> ves = {
+                ctx.iports[0]->pop(),
+                ctx.sim.timeout<message_t>(0.01*maxlat, msg)};
+            msg = co_await simzip::any_of(ctx.sim, ves);
+        }
+        else {
+            msg = (co_await ctx.iports[0]->pop());
         }
 
+        if (msg.ordering) {
+            ctx.recv(msg);
+
+            // std::cerr << "zipit:" << ctx.cfg["name"] << " recv:"
+            //           << " stream=" << msg.identity
+            //           << " order=" << msg.ordering
+            //           << " size=" << zip.size()   << "\n";
+            
+            bool ok = zip.feed(msg);
+            if (!ok) {
+                std::cerr << ctx.sim << " tardy: " << msg << "\n";
+            }
+        }
+        else {
+            std::cerr << ctx.sim << " timeout\n";
+        }
         // std::cerr << "pre feed stream="<< msg.identity << " to "<< ctx.cfg["name"]
-        //           << ": ident=" << ident << " cardinality=" << cardinality << " maxlat=" << maxlat
+        //           << ": cardinality=" << cardinality << " maxlat=" << maxlat
         //           << " size=" << zip.size() << " complete=" << zip.complete() << "\n";
 
         std::vector<message_t> got;
         if (maxlat > 0) {
-            zip.drain_prompt(std::back_inserter(got), debut);
+            zip.drain_prompt(std::back_inserter(got), timepoint(ctx.sim.now()));
         }
         else {
             zip.drain_waiting(std::back_inserter(got));

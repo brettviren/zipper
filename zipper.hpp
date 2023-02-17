@@ -116,6 +116,8 @@ namespace zipper {
             cardinality = k;
         }
 
+        ordering_t get_origin() const { return origin; }
+
         /**
            Clear the zipper merge buffer.
         */

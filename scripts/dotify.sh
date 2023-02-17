@@ -1,5 +1,5 @@
 #!/bin/bash
-wp=/home/bv/wrk/wct/point-cloud/.direnv/python-3.9.10/bin/wirecell-pgraph
+wp=wirecell-pgraph
 
 #    --graph-options rankdir=TB \
 

@@ -22,3 +22,4 @@ json
 __pycache__
 .direnv
 .envrc
+wire-cell-python

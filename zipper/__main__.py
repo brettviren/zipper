@@ -37,12 +37,12 @@ def plot_node_timing(node, all_nodes):
         if type == 'zipit':
             maxlat = data['max_latency']
             mult,tunit = time_unit(maxlat)
-            holding = data['zipsize']
+            holding = data.get('zipsize', 0)
             lost = len(data['Rsamples']) - len(data['Ssamples']) - holding
             extra = f'maxlat:{maxlat*mult:.1f} {tunit}, holding:{holding}, lost:{lost}'
         elif type == 'source':
             delay = all_nodes[data['delay']]
-            rate = 1.0/delay['data'][lifetime];
+            rate = 1.0/delay['data']['lifetime'];
             extra = 'rate:{rate:.1f} Hz'
         return f'{type}:{name} {extra}'
 

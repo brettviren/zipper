@@ -110,8 +110,9 @@ simcpp20::event<> consumer2(simcpp20::simulation<> &sim)
     // auto got = co_await either(sim, sim.timeout(1), sim.timeout(2,msg)); 
     std::vector<value_event_t> ve = {sim.timeout<message_t>(1,msg1),
                                      sim.timeout<message_t>(2,msg2)};
-    auto got = co_await any_of<message_t>(sim,ve);
-    std::cerr << "consumer2: " << got << std::endl;
+    message_t got = co_await any_of<message_t>(sim,ve);
+    std::cerr << "[" << sim.now() << "] " 
+              << "consumer2: " << got << std::endl;
 }
 
 int main() {

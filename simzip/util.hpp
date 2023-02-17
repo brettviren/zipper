@@ -8,6 +8,37 @@
 
 namespace simzip {
 
+    // A value event version of normal event any_of.
+    template<typename ValueType>
+    simcpp20::value_event<ValueType>
+    any_of(simcpp20::simulation<>& sim,
+           std::vector<simcpp20::value_event<ValueType>> ves)
+    {
+        ValueType dummy;
+
+        if (ves.size() == 0) {
+            return sim.timeout<ValueType>(0, dummy);
+        }
+
+        for (const auto &ve : ves) {
+            if (ve.processed()) {
+                return ve;
+                // return sim.timeout<ValueType>(0, dummy);
+            }
+        }
+
+        auto any_of_ve = sim.event<ValueType>();
+
+        for (const auto &ve : ves) {
+            ve.add_callback(
+                [any_of_ve, ve](const auto & other) mutable {
+                    any_of_ve.trigger(ve.value()); });
+        }
+
+        return any_of_ve;
+    }
+
+
     // A buffering message queue with fixed capacity
     template<typename Message>
     class bufque {
