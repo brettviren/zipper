@@ -312,7 +312,8 @@ struct node_t {
             
 
     // Call after a co_await on pop.  This will set message debut time
-    // to simulation now().
+    // to simulation now() after storing the time between ordering and
+    // the current simulation now time giving total latency.
     void recv(message_t& m)
     {
         const double then = m.ordering * tick_period;
@@ -321,8 +322,9 @@ struct node_t {
         m.debut = timepoint(now);
     }
 
-    // Call just before a co_await on push.  This will set message
-    // debut time to simulation now().
+    // Call just before a co_await on push.  This will reset message
+    // debut time to simulation now() after storing how much
+    // simulation time has passed giving relative latency.
     void send(message_t& m)
     {
         const double then = timepoint(m.debut);
@@ -512,36 +514,61 @@ event_t zipit(node_t& ctx)
     merge_t::duration_t max_latency = timepoint(maxlat).time_since_epoch();
     merge_t zip(cardinality, max_latency);
 
+    bool next_needed = true;
+    message_event_t next_message = ctx.sim.timeout<message_t>(0);
+
     while (true) {
-        message_t msg;
+        message_t msg, dummy_msg{{-1}};
+
+        if (next_needed) {
+            next_message = ctx.iports[0]->pop();
+            next_needed = false;
+        }
+        // at this point we do not know how long it takes for message
+        // to be received.  If we abserve max latency we can't wait
+        // too long for the message
         if (maxlat > 0.0) {
             std::vector<message_event_t> ves = {
-                ctx.iports[0]->pop(),
-                ctx.sim.timeout<message_t>(0.01*maxlat, msg)};
+                next_message,
+                ctx.sim.timeout<message_t>(0.01*maxlat, dummy_msg)
+            };
             msg = co_await simzip::any_of(ctx.sim, ves);
         }
         else {
-            msg = (co_await ctx.iports[0]->pop());
+            msg = co_await next_message;
         }
 
-        if (msg.ordering) {
+        if (msg.payload.a < 0) { 
+            // We got the dummy message due to timeout.
+            std::cerr << ctx.sim << " timeout\n";
+        }
+        else {
+            // Will got real message, will need fresh one.
+            next_needed = true; 
             ctx.recv(msg);
-
-            // std::cerr << "zipit:" << ctx.cfg["name"] << " recv:"
-            //           << " stream=" << msg.identity
-            //           << " order=" << msg.ordering
-            //           << " size=" << zip.size()   << "\n";
-            
             bool ok = zip.feed(msg);
             if (!ok) {
                 std::cerr << ctx.sim << " tardy: " << msg << "\n";
             }
+
+            std::string status = ok ? " ack" : " rej";
+            std::cerr << "zipit="<< msg.identity << " to "<< ctx.cfg["name"]
+                      << status
+                      << " ordering=" << msg.ordering
+                      << " debut=" << timepoint(msg.debut)
+                      << " origin=" << zip.get_origin()
+                      << " size=" << zip.size()
+                      << " complete=" << zip.complete() << "\n";
+            // std::cerr << "zipit:" << ctx.cfg["name"] << " recv:"
+            //           << ok
+            //           << " stream=" << msg.identity
+            //           << " order=" << msg.ordering
+            //           << " size=" << zip.size()   << "\n";
         }
-        else {
-            std::cerr << ctx.sim << " timeout\n";
-        }
-        // std::cerr << "pre feed stream="<< msg.identity << " to "<< ctx.cfg["name"]
-        //           << ": cardinality=" << cardinality << " maxlat=" << maxlat
+
+        // std::cerr << "zipit="<< msg.identity << " to "<< ctx.cfg["name"]
+        //           << " ordering=" << msg.ordering
+        //           << " origin=" << zip.get_origin()
         //           << " size=" << zip.size() << " complete=" << zip.complete() << "\n";
 
         std::vector<message_t> got;
@@ -559,7 +586,10 @@ event_t zipit(node_t& ctx)
             //           << " order=" << msg.ordering
             //           << " size=" << zip.size() 
             //           << "\n";
+            // const auto t1 = ctx.sim.now();
             co_await ctx.oports[0]->push(one);
+            // const auto t2 = ctx.sim.now();
+            // std::cerr << "zipit: " << t2-t1 << " send delay\n";
         }
 
         ctx.cfg["/data/zipsize"_json_pointer] = zip.size();

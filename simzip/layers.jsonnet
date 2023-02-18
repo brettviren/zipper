@@ -123,6 +123,11 @@ local tp_zipper_maxlat = 100 * microsecond;
 // fixme: move the layer number into hierarchy_layer() passing it to the generator.
 local test_scenarios = {
 
+    // Just source-zipper-sink, dumbest thing evar.
+    ziptwo : hierarchy_layer(simple_sink, [
+        {count:1, generator:layer_generators.zipit(2, 1.0)},
+        {count:2, generator:layer_generators.source(sz.rando.exponential("delay",1.0))}]),
+
     sourcesink : hierarchy_layer(simple_sink, [
         {count:2, generator:layer_generators.zipit(3)},
         {count:3, generator:layer_generators.source(sz.rando.exponential("delay",1.0))}]),

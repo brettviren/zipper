@@ -43,17 +43,22 @@ def plot_node_timing(node, all_nodes):
         elif type == 'source':
             delay = all_nodes[data['delay']]
             rate = 1.0/delay['data']['lifetime'];
-            extra = 'rate:{rate:.1f} Hz'
+            extra = f'rate:{rate:.1f} Hz'
         return f'{type}:{name} {extra}'
 
     plt.clf()
     dat = node["data"]
-    maxval=0
+    allvals = list()
     for which in ('send','recv'):
         W = which[0].upper()
-        maxval = max([maxval] + dat[f'{W}samples'])
+        allvals += dat[f'{W}samples']
+    minval = min(allvals)
+    maxval = max(allvals)
 
     mult, tunit = time_unit(maxval)
+
+    nbins = 20
+    brange = (minval*mult, maxval*mult)
 
     for which in ('send','recv'):
         w = which[0]
@@ -65,7 +70,7 @@ def plot_node_timing(node, all_nodes):
 
         if len(samps) == 0:
             continue
-        c,h = numpy.histogram(samps)
+        c,h = numpy.histogram(samps, nbins, brange)
         label = f'{which}: {n} {mu:.1f}+/-{rms:.1f} {tunit}'
         plt.stairs(c,h, label=label)
     
