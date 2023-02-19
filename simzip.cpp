@@ -260,7 +260,6 @@ ports_t make_ports(sim_t& sim, const cfg_t& node, const std::string which)
         ret.push_back(std::make_shared<mqueue_t>(sim, capacity));
     }
     return ret;
-
 }
 
 // Every node/coroutine gets a node_t by reference.
@@ -286,6 +285,9 @@ struct node_t {
     // Keep stats about messages just prior to sending out node.
     simzip::Stats sended{false};
 
+    // Keep stats about time to send out a message
+    simzip::Stats doneed{false};
+
 
     // Owning ports
     node_t(sim_t& sim, rnd_t& rnd, const cfg_t& cfg, bool samples=true)
@@ -296,6 +298,7 @@ struct node_t {
         , oports(make_ports(sim, cfg, "obox"))
         , recved{samples}
         , sended{samples}
+        , doneed{samples}
     {
         if (iports.empty() and oports.empty()) {
             throw std::invalid_argument("no ports in node:" + cfg.dump());
@@ -338,6 +341,14 @@ struct node_t {
         }
     }
 
+    // Call after message is sent
+    void done(message_t& m)
+    {
+        const double then = timepoint(m.debut);
+        const double now = sim.now();        
+        doneed(now-then);
+    }
+
     // Dump self as cfg obj
     cfg_t stats() const
     {
@@ -350,12 +361,19 @@ struct node_t {
             {"Smu",  sended.mean()},
             {"Srms", sended.rms()},
             {"Sstr", sended.dump()},
+            {"Dn",   doneed.S0},
+            {"Dmu",  doneed.mean()},
+            {"Drms", doneed.rms()},
+            {"Dstr", doneed.dump()},
         };
         if (recved.sample) {
             ret["Rsamples"] = recved.samples;
         }
         if (sended.sample) {
             ret["Ssamples"] = sended.samples;
+        }
+        if (doneed.sample) {
+            ret["Dsamples"] = doneed.samples;
         }
         return ret;
     }
@@ -394,7 +412,7 @@ event_t source(node_t& ctx)
 
         ctx.send(msg);
         co_await ctx.oports[0]->push(msg);
-
+        ctx.done(msg);
     }
 }
 
@@ -427,6 +445,7 @@ event_t burst(node_t& ctx)
         for (int num = count(); num > 0; --num) {
             co_await ctx.oports[0]->push(msg);
         }
+        ctx.done(msg);
     }
 }
     
@@ -469,6 +488,7 @@ event_t coherent(node_t& ctx)
             co_await ctx.oports[beg]->push(copy);
             ++beg;
         }        
+        ctx.done(msg);
     }
 }
 
@@ -486,20 +506,26 @@ event_t sink(node_t& ctx)
 // It's configuration is that of an EDGE
 event_t transfer(node_t& ctx)
 {
-    auto& del = ctx.rnd(ctx.cfg.value("delay","random:zeros"));
+    std::cerr << "TRANSFER: " << ctx.cfg << "\n";
+    auto rname = ctx.cfg.value("/data/delay"_json_pointer,"random:zeros");
+
+    auto& del = ctx.rnd(rname);
 
     while (true) {
 
-        const double delay = del();
-
+        double delay = del();
+        // std::cerr << "transfer delay: " << rname << ": " << delay << std::endl;
         auto msg = (co_await ctx.iports[0]->pop());
         ctx.recv(msg);
 
         // simulate transmission delay
-        co_await ctx.sim.timeout(delay);
+        if (delay > 0) {
+            co_await ctx.sim.timeout(delay);
+        }
 
         ctx.send(msg);
         co_await ctx.oports[0]->push(msg);
+        ctx.done(msg);
     }
 }
 
@@ -590,6 +616,7 @@ event_t zipit(node_t& ctx)
             co_await ctx.oports[0]->push(one);
             // const auto t2 = ctx.sim.now();
             // std::cerr << "zipit: " << t2-t1 << " send delay\n";
+            ctx.send(one);
         }
 
         ctx.cfg["/data/zipsize"_json_pointer] = zip.size();
@@ -655,7 +682,7 @@ struct node_store_t {
         auto hport = hnode.iports.at(hind);
 
         auto ekey = make_edge_key(edge);
-        // store[ekey] = std::make_shared<node_t>(node_t(sim, rnd, edge, {tport}, {hport}));
+        std::cerr << "EDGE: " << edge << "\n";
         store.emplace(ekey, node_t(sim, rnd, edge, {tport}, {hport}));
         return ekey;
     }
@@ -703,8 +730,8 @@ struct context_t
         for (auto& edge : cfg["edges"])
         {
             auto ekey = node_store.set_edge(edge);
-            auto& nctx = node_store.get(ekey);
-            transfer(nctx);                
+            auto& ectx = node_store.get(ekey);
+            transfer(ectx);                
         }
 
         // Loop again to execute nodes
@@ -776,7 +803,8 @@ struct context_t
             auto cfg = nctx.stats();
             ss << key << "\n"
                << "\trecved: " << cfg["Rstr"] << "\n"
-               << "\tsended: " << cfg["Sstr"] << "\n";
+               << "\tsended: " << cfg["Sstr"] << "\n"
+               << "\tdoneed: " << cfg["Dstr"] << "\n";
         }
         return ss.str();
     }

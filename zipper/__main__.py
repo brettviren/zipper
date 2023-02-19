@@ -27,7 +27,24 @@ def time_unit(tval, past=1):
         mult *= 1000
     return (mult, tunit)
 
+def rando_title(rando, node, all_nodes):
+    rref = node['data'][rando]
+    rtyp,rnam = rref.split(":")
+    delay = all_nodes[rref]
+    distro = delay['data']['distribution']
+    if distro == 'exponential':
+        rate = 1.0/delay['data']['lifetime'];
+        return f'{rnam}/{rate:.1f} Hz'
+    if distro == 'fixed':
+        period = delay['data']['value'];
+        m,u = time_unit(period)
+        period *- m
+        return f'{rnam}/{period:.1f} {u}'
+    
+
 def plot_node_timing(node, all_nodes):
+
+    colors=dict(recv="blue", send="red", done="black")
 
     def make_title():
         type=node['type']
@@ -41,9 +58,10 @@ def plot_node_timing(node, all_nodes):
             lost = len(data['Rsamples']) - len(data['Ssamples']) - holding
             extra = f'maxlat:{maxlat*mult:.1f} {tunit}, holding:{holding}, lost:{lost}'
         elif type == 'source':
-            delay = all_nodes[data['delay']]
-            rate = 1.0/delay['data']['lifetime'];
-            extra = f'rate:{rate:.1f} Hz'
+            extra = rando_title("delay", node, all_nodes)
+        elif type == 'transfer':
+            extra = rando_title("delay", node, all_nodes)
+
         return f'{type}:{name} {extra}'
 
     plt.clf()
@@ -60,7 +78,7 @@ def plot_node_timing(node, all_nodes):
     nbins = 20
     brange = (minval*mult, maxval*mult)
 
-    for which in ('send','recv'):
+    for which in ('recv','send','done'):
         w = which[0]
         W = w.upper()
         samps = numpy.array(dat[f'{W}samples'])*mult
@@ -72,7 +90,7 @@ def plot_node_timing(node, all_nodes):
             continue
         c,h = numpy.histogram(samps, nbins, brange)
         label = f'{which}: {n} {mu:.1f}+/-{rms:.1f} {tunit}'
-        plt.stairs(c,h, label=label)
+        plt.stairs(c,h, label=label, color=colors[which])
     
     plt.title(make_title())
     plt.legend()
