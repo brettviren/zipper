@@ -1,4 +1,5 @@
 #include "fschuetz04/simcpp20.hpp"
+#include "simzip/util.hpp"
 #include <iostream>
 #include <string>
 
@@ -69,50 +70,46 @@ simcpp20::event<> consumer(simcpp20::simulation<> &sim) {
 //     return any_of_ev;
 // }
 
-template<typename ValueType>
-simcpp20::value_event<ValueType>
-any_of(simcpp20::simulation<>& sim, std::vector<simcpp20::value_event<ValueType>> ves)
-{
-    ValueType dummy;
+// template<typename ValueType>
+// simcpp20::value_event<ValueType>
+// any_of(simcpp20::simulation<>& sim, std::vector<simcpp20::value_event<ValueType>> ves)
+// {
+//     ValueType dummy;
 
-    if (ves.size() == 0) {
-        return sim.timeout<ValueType>(0, dummy);
-    }
+//     if (ves.size() == 0) {
+//         return sim.timeout<ValueType>(0, dummy);
+//     }
 
-    for (const auto &ve : ves) {
-        if (ve.processed()) {
-            return ve;
-            // return sim.timeout<ValueType>(0, dummy);
-        }
-    }
+//     for (const auto &ve : ves) {
+//         if (ve.processed()) {
+//             return ve;
+//             // return sim.timeout<ValueType>(0, dummy);
+//         }
+//     }
 
-    auto any_of_ve = sim.event<ValueType>();
+//     auto any_of_ve = sim.event<ValueType>();
 
-    for (const auto &ve : ves) {
-        ve.add_callback(
-            [any_of_ve, ve](const auto & other) mutable {
-                any_of_ve.trigger(ve.value()); });
-    }
+//     for (const auto &ve : ves) {
+//         ve.add_callback(
+//             [any_of_ve, ve](const auto & other) mutable {
+//                 any_of_ve.trigger(ve.value()); });
+//     }
 
-    return any_of_ve;
-}
+//     return any_of_ve;
+// }
 
 simcpp20::event<> consumer2(simcpp20::simulation<> &sim)
 {
-    message_t msg{"from consumer2", 1};
+    message_t dummy{"dummy", 0};
     message_t msg1{"msg1", 1};
     message_t msg2{"msg2", 2};
-    // auto got = co_await any_of(sim, {ev, sim.timeout<message_t>(1, msg)});
-    // auto got = co_await(sim.timeout<int>(1,1) | sim.timeout<int>(2,2));
-    // std::vector<value_event_t> evs = {sim.timeout<message_t>(1,msg1),
-    //                                   sim.timeout<message_t>(2,msg2)};
-    // auto got = co_await any_of(sim, evs) ;
-    // auto got = co_await either(sim, sim.timeout(1), sim.timeout(2,msg)); 
-    std::vector<value_event_t> ve = {sim.timeout<message_t>(1,msg1),
-                                     sim.timeout<message_t>(2,msg2)};
-    message_t got = co_await any_of<message_t>(sim,ve);
+
+    std::vector<value_event_t> ve = {sim.timeout<message_t>(10,msg1),
+                                     sim.timeout<message_t>(20,msg2)};
+    message_t got = co_await simzip::any_of<message_t>(sim,ve);
     std::cerr << "[" << sim.now() << "] " 
               << "consumer2: " << got << std::endl;
+    assert(got.s == "msg1");
 }
 
 int main() {

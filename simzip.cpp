@@ -279,6 +279,9 @@ struct node_t {
     // Vector of input and output ports.
     ports_t iports, oports;
 
+    // Keep stats about times between message creation
+    simzip::Stats inited{false};
+
     // Keep stats about messages just received in to a node.
     simzip::Stats recved{false};
 
@@ -288,6 +291,7 @@ struct node_t {
     // Keep stats about time to send out a message
     simzip::Stats doneed{false};
 
+    size_t ident{0};
 
     // Owning ports
     node_t(sim_t& sim, rnd_t& rnd, const cfg_t& cfg, bool samples=true)
@@ -296,6 +300,7 @@ struct node_t {
         , cfg(cfg)
         , iports(make_ports(sim, cfg, "ibox"))
         , oports(make_ports(sim, cfg, "obox"))
+        , inited{samples}
         , recved{samples}
         , sended{samples}
         , doneed{samples}
@@ -303,6 +308,7 @@ struct node_t {
         if (iports.empty() and oports.empty()) {
             throw std::invalid_argument("no ports in node:" + cfg.dump());
         }
+        ident = cfg.value("/data/ident"_json_pointer, 0);
     }
 
     // Usin others ports
@@ -311,8 +317,24 @@ struct node_t {
         : sim(sim)
         , rnd(rnd)
         , cfg(cfg)
-        , iports(iports), oports(oports) {}
+        , iports(iports), oports(oports)
+    {
+        ident = cfg.value("/data/ident"_json_pointer, 0);
+    }
             
+
+    // Call to initialize a new message 
+    void init(message_t& m)
+    {
+        const double now = sim.now();        
+
+        inited(now);
+        m.debut = timepoint(now);
+
+        if (ident) {
+            m.identity = ident;
+        }
+    }
 
     // Call after a co_await on pop.  This will set message debut time
     // to simulation now() after storing the time between ordering and
@@ -335,7 +357,6 @@ struct node_t {
         sended(now-then);
         m.debut = timepoint(now);
         
-        size_t ident = cfg.value("/data/ident"_json_pointer, 0);
         if (ident) {
             m.identity = ident;
         }
@@ -353,6 +374,10 @@ struct node_t {
     cfg_t stats() const
     {
         auto ret = cfg_t{
+            {"In",   inited.S0},
+            {"Imu",  inited.mean()},
+            {"Irms", inited.rms()},
+            {"Istr", inited.dump()},
             {"Rn",   recved.S0},
             {"Rmu",  recved.mean()},
             {"Rrms", recved.rms()},
@@ -366,6 +391,9 @@ struct node_t {
             {"Drms", doneed.rms()},
             {"Dstr", doneed.dump()},
         };
+        if (inited.sample) {
+            ret["Isamples"] = inited.samples;
+        }
         if (recved.sample) {
             ret["Rsamples"] = recved.samples;
         }
@@ -402,6 +430,7 @@ event_t source(node_t& ctx)
         const message_t::ordering_t ordering = now / tick_period;
             
         message_t msg{{}, ordering, 0, timepoint(now)};
+        ctx.init(msg);
 
         /// we are source, recv times are meaningless
         // ctx.recv(msg);
@@ -506,19 +535,18 @@ event_t sink(node_t& ctx)
 // It's configuration is that of an EDGE
 event_t transfer(node_t& ctx)
 {
-    std::cerr << "TRANSFER: " << ctx.cfg << "\n";
+    // std::cerr << "TRANSFER: " << ctx.cfg << "\n";
     auto rname = ctx.cfg.value("/data/delay"_json_pointer,"random:zeros");
 
     auto& del = ctx.rnd(rname);
 
     while (true) {
 
-        double delay = del();
-        // std::cerr << "transfer delay: " << rname << ": " << delay << std::endl;
         auto msg = (co_await ctx.iports[0]->pop());
         ctx.recv(msg);
 
         // simulate transmission delay
+        const double delay = del();
         if (delay > 0) {
             co_await ctx.sim.timeout(delay);
         }
@@ -566,7 +594,7 @@ event_t zipit(node_t& ctx)
 
         if (msg.payload.a < 0) { 
             // We got the dummy message due to timeout.
-            std::cerr << ctx.sim << " timeout\n";
+            // std::cerr << ctx.sim << " timeout\n";
         }
         else {
             // Will got real message, will need fresh one.
@@ -578,13 +606,13 @@ event_t zipit(node_t& ctx)
             }
 
             std::string status = ok ? " ack" : " rej";
-            std::cerr << "zipit="<< msg.identity << " to "<< ctx.cfg["name"]
-                      << status
-                      << " ordering=" << msg.ordering
-                      << " debut=" << timepoint(msg.debut)
-                      << " origin=" << zip.get_origin()
-                      << " size=" << zip.size()
-                      << " complete=" << zip.complete() << "\n";
+            // std::cerr << "zipit="<< msg.identity << " to "<< ctx.cfg["name"]
+            //           << status
+            //           << " ordering=" << msg.ordering
+            //           << " debut=" << timepoint(msg.debut)
+            //           << " origin=" << zip.get_origin()
+            //           << " size=" << zip.size()
+            //           << " complete=" << zip.complete() << "\n";
             // std::cerr << "zipit:" << ctx.cfg["name"] << " recv:"
             //           << ok
             //           << " stream=" << msg.identity
@@ -616,7 +644,7 @@ event_t zipit(node_t& ctx)
             co_await ctx.oports[0]->push(one);
             // const auto t2 = ctx.sim.now();
             // std::cerr << "zipit: " << t2-t1 << " send delay\n";
-            ctx.send(one);
+            ctx.done(one);
         }
 
         ctx.cfg["/data/zipsize"_json_pointer] = zip.size();
@@ -682,7 +710,7 @@ struct node_store_t {
         auto hport = hnode.iports.at(hind);
 
         auto ekey = make_edge_key(edge);
-        std::cerr << "EDGE: " << edge << "\n";
+        // std::cerr << "EDGE: " << edge << "\n";
         store.emplace(ekey, node_t(sim, rnd, edge, {tport}, {hport}));
         return ekey;
     }

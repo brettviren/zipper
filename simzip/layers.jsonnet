@@ -133,16 +133,36 @@ local test_scenarios = {
                                                       {ibox:1000,obox:1000})},
         {count:1, generator:layer_generators.source(sz.rando.exponential("delay",1.0))}]),
 
-    ticktock : hierarchy_layer(simple_sink, [
-        {count:1, generator:layer_generators.transfer(sz.rando.fixed("trans_delay", 10.0))},
-        {count:1, generator:layer_generators.source(sz.rando.fixed("delay",1.0))}]),
+    ticktock : hierarchy_layer(simple_sink, [ {
+        count:1,
+        generator:layer_generators.transfer(sz.rando.fixed("trans_delay", 10.0))
+    }, {
+        count:1,
+        generator:layer_generators.source(sz.rando.fixed("delay",1.0))}]),
 
-    onetwozip : hierarchy_layer(simple_sink, [
-        {count:2, generator:layer_generators.zipit(2)},
-        {count:1, generator:layer_generators.transfer(sz.rando.exponential("delay", 1.0))},
-        {count:2, generator:layer_generators.zipit(2)},
-        {count:1, generator:layer_generators.transfer(sz.rando.exponential("delay", 1.0))},
-        {count:2, generator:layer_generators.source(sz.rando.exponential("delay",1.0))}
+    ticktockbuff : hierarchy_layer(simple_sink, [ {
+        count:1,
+        generator:layer_generators.transfer(sz.rando.fixed("trans_delay", 10.0),
+                                            {ibox:1000,obox:1000})
+    }, {
+        count:1,
+        generator:layer_generators.source(sz.rando.fixed("delay",1.0))}]),
+
+    onetwozip : hierarchy_layer(simple_sink, [ {
+        count:2,
+        generator:layer_generators.zipit(2)
+    }, {
+        count:1,
+        generator:layer_generators.transfer(sz.rando.exponential("delay", 1.0))
+    }, {
+        count:2,
+        generator:layer_generators.zipit(2)
+    }, {
+        count:1,
+        generator:layer_generators.transfer(sz.rando.exponential("delay", 1.0))
+    }, {
+        count:2,
+        generator:layer_generators.source(sz.rando.exponential("delay",1.0))}
     ]),
 
     cohsrc : hierarchy_layer(simple_sink, [
@@ -150,11 +170,14 @@ local test_scenarios = {
     ]),
         
     aparad : hierarchy_layer(simple_sink, [
-        {count: 1, generator:layer_generators.zipit(10, tp_zipper_maxlat)}, // zip 10 links to one
-        {count: 10, generator:layer_generators.transfer(sz.rando.exponential("transfer_delay", 1.0))},
+        // zip 10 links to one
+        {count: 1, generator:layer_generators.zipit(10, tp_zipper_maxlat)}, 
+        // {count: 10, generator:layer_generators.transfer(
+        //     sz.rando.exponential("transfer_delay", 1.0))},
         // (1.0 becquerel / kg )  * 10 kiloton / 200 -> 45 kHz / 2.2e-5 second
-        {count: 1, generator:layer_generators.burst(sz.rando.exponential("decay_delay", per_face_ardk_period),
-                                                    sz.rando.uniint("burst_count", 1, 10))}]),
+        {count: 10, generator:layer_generators.burst(
+            sz.rando.exponential("decay_delay", per_face_ardk_period),
+            sz.rando.uniint("burst_count", 1, 10))}]),
 };
 
 // function (cardinality=1) 

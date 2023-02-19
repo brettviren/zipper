@@ -42,9 +42,9 @@ def rando_title(rando, node, all_nodes):
         return f'{rnam}/{period:.1f} {u}'
     
 
-def plot_node_timing(node, all_nodes):
+def plot_node_timing(node, all_nodes, which_timing=('recv','send','done')):
 
-    colors=dict(recv="blue", send="red", done="black")
+    colors=dict(recv="blue", send="red", done="black", init="green")
 
     def make_title():
         type=node['type']
@@ -67,7 +67,7 @@ def plot_node_timing(node, all_nodes):
     plt.clf()
     dat = node["data"]
     allvals = list()
-    for which in ('send','recv'):
+    for which in which_timing:
         W = which[0].upper()
         allvals += dat[f'{W}samples']
     minval = min(allvals)
@@ -75,10 +75,10 @@ def plot_node_timing(node, all_nodes):
 
     mult, tunit = time_unit(maxval)
 
-    nbins = 20
+    nbins = 100
     brange = (minval*mult, maxval*mult)
 
-    for which in ('recv','send','done'):
+    for which in which_timing:
         w = which[0]
         W = w.upper()
         samps = numpy.array(dat[f'{W}samples'])*mult
@@ -117,23 +117,26 @@ def index_nodes(nodes):
     return ret
 
 @cli.command("plot-node")
+@click.option("-d", "--data", default="send,recv", help="comma-separated list of data to plot")
 @click.option("-k", "--kind", type=str, help="node kind name")
 @click.option("-i", "--inst", default="", type=str, help="node instance name")
 @click.option("-o", "--outfile", type=str, help="output file")
 @click.argument('infile')
-def cmd_plot_one(kind, inst, outfile, infile):
+def cmd_plot_one(data, kind, inst, outfile, infile):
     nodes = json.load(open(infile))["nodes"]
     all_nodes = index_nodes(nodes)
     node = all_nodes[type_name(kind, inst)]
-    plot_node_timing(node, all_nodes)
+    plot_node_timing(node, all_nodes, data.split(","))
     plt.savefig(outfile)
 
 
 @cli.command("graph-plots")
+@click.option("-d", "--data", default="recv,send,done", help="comma-separated list of data to plot")
 @click.option("-f", "--figext", type=str, default=None, help="figure extensions")
 @click.option("-o", "--outfile", type=str, help="output file")
 @click.argument('infile')
-def cmd_graph_plots(figext, outfile, infile):
+def cmd_graph_plots(data, figext, outfile, infile):
+    which_timing = data.split(",")
     nodes = json.load(open(infile))["nodes"]
     all_nodes = index_nodes(nodes)
 
@@ -164,7 +167,7 @@ def cmd_graph_plots(figext, outfile, infile):
     for node in nodes:
         if node['type'] in ('random',):
             continue
-        plot_node_timing(node, all_nodes)
+        plot_node_timing(node, all_nodes, which_timing)
         name = oname(node)
         fn = name + "." + figext
         if dirname:
