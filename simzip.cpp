@@ -26,7 +26,11 @@ void usage()
 
 // Mock up a TP/TA/TC message.  Generally, anything that may be subject to a zipper.
 // https://github.com/DUNE-DAQ/detdataformats/blob/develop/include/detdataformats/trigger/TriggerPrimitive.hpp
-using payload_t = double;       // the "now" of message creation
+struct payload_t {
+    double birth{0};            // the "now" of message creation
+    int64_t seqno{0};           // count message from a source
+    int origin{-1};             // source ID number
+};
 using message_t = zipper::Node<payload_t>;
 using merge_t = zipper::merge<message_t>;
 
@@ -56,38 +60,58 @@ double timepoint(const message_t::timepoint_t& now)
 
 namespace zipper {
 void to_json(cfg_t& j, const message_t& msg) {
-    j = cfg_t{{"pay",msg.payload},
-              {"ord",msg.ordering},
-              {"id", msg.identity},
-              {"t", timepoint(msg.debut)}};
+    j = cfg_t{{"birth",msg.payload.birth},
+              {"seqno",msg.payload.seqno},
+              {"origin",msg.payload.origin},
+              {"order",msg.ordering},
+              {"ident", msg.identity},
+              {"debut", timepoint(msg.debut)}};
 }
+// struct of arrays
 void to_json(cfg_t& jarr, const std::vector<message_t>& msgs) {
     for (const message_t& msg : msgs) {
-        cfg_t j = msg;
-        jarr.push_back(j);
+        jarr["birth"].push_back(msg.payload.birth);
+        jarr["seqno"].push_back(msg.payload.seqno);
+        jarr["origin"].push_back(msg.payload.origin);
+        jarr["order"].push_back(msg.ordering);
+        jarr["ident"].push_back(msg.identity);
+        jarr["debut"].push_back(timepoint(msg.debut));
     }
 }
 
 void from_json(const cfg_t& j, message_t& msg) {
-    j.at("pay").get_to(msg.payload);
-    j.at("ord").get_to(msg.ordering);
-    j.at("id").get_to(msg.identity);
+    j.at("birth").get_to(msg.payload.birth);
+    j.at("seqno").get_to(msg.payload.seqno);
+    j.at("origin").get_to(msg.payload.origin);
+    j.at("order").get_to(msg.ordering);
+    j.at("ident").get_to(msg.identity);
     double t = 0;
-    j.at("t").get_to(t);
+    j.at("debut").get_to(t);
     msg.debut = timepoint(t);
 }
+// struct of arrays
 void from_json(const cfg_t& jarr, std::vector<message_t>& msgs) {
-    for (const auto& j : jarr) {
-        auto msg = j.get<message_t>();
-        msgs.push_back(msg);
+    const size_t len = jarr["ident"].size();
+    for (size_t ind=0; ind<len; ++ind) {
+        message_t msg;
+        jarr["birth"][ind].get_to(msg.payload.birth);
+        jarr["seqno"][ind].get_to(msg.payload.seqno);
+        jarr["origin"][ind].get_to(msg.payload.origin);
+        jarr["order"][ind].get_to(msg.ordering);
+        jarr["ident"][ind].get_to(msg.identity);
+        double t = 0;
+        jarr["debut"][ind].get_to(t);
+        msg.debut = timepoint(t);
     }
 }
-}
+};                              // namespace zipper
 
 std::ostream& operator<<(std::ostream& o, const message_t& m)
 {
-    auto ms = std::chrono::duration_cast<std::chrono::microseconds>(m.debut.time_since_epoch()).count();
-    o << m.identity << " #" << m.ordering << " @" << ms << "us";
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(m.debut.time_since_epoch()).count();
+    o << m.payload.origin << " #" << m.payload.seqno << " @" << m.payload.birth
+      << " --> "
+      << m.identity << " #" << m.ordering << " @" << us << "us";
     return o;
 }
 std::ostream& operator<<(std::ostream& o, const sim_t& sim)
@@ -351,14 +375,15 @@ struct node_t {
         msg.debut = timepoint(sim.now());
     }
     
-
+    int64_t seqno{0};
     std::vector<message_t> msgs_creat;
     // Create a new message.
     message_t creat()
     {
         const double now = sim.now();
         const message_t::ordering_t ordering = now / tick_period;
-        message_t msg(now, ordering, ident, timepoint(now));
+        message_t msg({now, seqno, ident}, ordering, ident, timepoint(now));
+        ++seqno;
         msgs_creat.push_back(msg);
         return msg;
     }
@@ -374,26 +399,28 @@ struct node_t {
             recv_message = iports[0]->pop();
             recv_needed = false;
         }
+        
+        msg = message_t{};
 
-        message_t dummy_msg{0, 0, 0, timepoint(0)};
         if (recv_timeout > 0) {
             std::vector<message_event_t> ves = {
                 recv_message,
-                sim.timeout<message_t>(recv_timeout, dummy_msg)
+                sim.timeout<message_t>(recv_timeout, msg)
             };
-            msg = co_await simzip::any_of<message_t>(sim, ves);
+            auto got = co_await simzip::any_of<message_t>(sim, ves);
             if (recv_message.triggered()) {
                 recv_needed = true;
+                msg = got;
                 redebut(msg);
                 msgs_recv.push_back(msg);
-                co_return;
             }
-            co_await sim.timeout(0);
         }
-
-        msg = co_await iports[0]->pop();
-        redebut(msg);
-        msgs_recv.push_back(msg);
+        else {
+            msg = co_await recv_message;
+            recv_needed = true;
+            redebut(msg);
+            msgs_recv.push_back(msg);
+        }
         co_await sim.timeout(0);
     }
 
@@ -448,6 +475,9 @@ event_t source(node_t& ctx)
     sim_t& sim = ctx.sim;
     auto& del = ctx.rnd(ctx.cfg["/data/delay"_json_pointer]);
 
+    double start_time = ctx.cfg.value("/data/start"_json_pointer, 1.0);
+    co_await sim.timeout(start_time);
+
     while (true) {
         auto msg = ctx.creat();
         co_await sim.timeout(del());
@@ -496,7 +526,8 @@ event_t transfer(node_t& ctx)
 
         message_t msg;
         co_await ctx.recv(msg);
-        if (! msg.payload) continue;
+        if (msg.payload.origin < 0) continue;
+        std::cerr << "rx: " << msg << std::endl;
         
         // simulate transmission delay
         const double delay = del();
@@ -523,7 +554,7 @@ event_t zipit(node_t& ctx)
         message_t msg;
         co_await ctx.recv(msg);
         
-        if (msg.payload) {
+        if (msg.payload.origin >= 0) {
             bool ack = zip.feed(msg);
             if (!ack) {
                 std::cerr << ctx.sim << " tardy: " << msg << "\n";

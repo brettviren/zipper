@@ -9,11 +9,14 @@ import subprocess
 import numpy
 import matplotlib.pyplot as plt
 
+from .nodes import *
+
 cmddef = dict(context_settings = dict(help_option_names=['-h', '--help']))
 @click.group(**cmddef)
 @click.pass_context
 def cli(ctx):
     ctx.obj = dict()
+
 
 def time_unit(tval, past=1):
     '''
@@ -197,17 +200,54 @@ def cmd_graph_plots(data, figext, outfile, infile):
     proc = subprocess.Popen(dotcmd, shell=True, stdin = subprocess.PIPE)
     proc.communicate(input=dtext.encode("utf-8"))
 
+
+@cli.command("plot-time")
+@click.option("-n","--nodes", default=None,
+              help="Nodes to plot")
+@click.option("-o","--output", default="plot.png",
+              help="Output file name")
+@click.argument('jsonfile')
+def cmd_plot_time(nodes, output, jsonfile):
+    dname = os.path.basename(os.path.dirname(jsonfile))
+    fname = os.path.splitext(os.path.basename(jsonfile))[0]
+    jnodes = json.load(open(jsonfile))["nodes"]
+    nbytn = {typename(n):msg_arrays(n) for n in jnodes if n['type'] != 'random'}
+    if nodes is None:
+        nodes = nbytn
+    else:
+        nodes = {tn:nbytn[tn] for tn in nodes.split(",")}
+
+
+    plt.clf();
+    nnodes = len(nodes)
+    fig, axes = plt.subplots(nrows=nnodes, sharex=True)
+    for ax, (tn,marrs) in zip(axes, nodes.items()):
+        for sock,marr in marrs.items():
+            print(tn,sock,list(marr.keys()))
+            osclock = marr['ts']
+            hwclock = marr['pays']
+            lat = osclock-hwclock
+            lab = f'{sock} latency'
+            ax.plot(osclock, lat, label=lab)
+
+        ax.set_title(f'Latency {tn}')
+        ax.set_xlabel('time [s]')
+        ax.legend()
+    plt.suptitle(f'{dname}/{fname}')
+    plt.tight_layout()
+    plt.savefig(output)
+
 @cli.command("ls")
 @click.argument('infile')
 def cmd_ls(infile):
     for node in json.load(open(infile))["nodes"]:
         if node['type'] in ('random',):
             continue
-        tn = node['type'] + ":" + node['name']
-        d = node['data']
-        r = 'R:{Rn} {Rmu:.3f}+/-{Rrms:.3f}'.format(**d)
-        s = 'S:{Sn} {Smu:.3f}+/-{Srms:.3f}'.format(**d)
-        print(f'{tn:16}{r:32}{s:32}')
+        tn = typename(node)
+        node_marrs = msg_arrays(node)
+        for name, marrs in node_marrs.items():
+            for key, marr in marrs.items():
+                print(f'{tn} {name} {key} {marr.shape} {marr.dtype}')
 
 
 def main():

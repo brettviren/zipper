@@ -135,7 +135,7 @@ local test_scenarios = {
 
     ticktock : hierarchy_layer(simple_sink, [ {
         count:1,
-        generator:layer_generators.transfer(sz.rando.fixed("trans_delay", 10.0))
+        generator:layer_generators.transfer(sz.rando.fixed("trans_delay", 1.0))
     }, {
         count:1,
         generator:layer_generators.source(sz.rando.fixed("delay",1.0))}]),
