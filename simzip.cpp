@@ -26,10 +26,8 @@ void usage()
 
 // Mock up a TP/TA/TC message.  Generally, anything that may be subject to a zipper.
 // https://github.com/DUNE-DAQ/detdataformats/blob/develop/include/detdataformats/trigger/TriggerPrimitive.hpp
-struct Payload {
-    int a{0}, b{0}, c{0}, d{0}, e{0}, f{0};
-};
-using message_t = zipper::Node<Payload>; // NOT a pgraph "node"
+using payload_t = double;       // the "now" of message creation
+using message_t = zipper::Node<payload_t>;
 using merge_t = zipper::merge<message_t>;
 
 using event_t = simcpp20::event<>;
@@ -40,6 +38,51 @@ using message_event_t = simcpp20::value_event<message_t>;
 using cfg_t = nlohmann::json;
 using namespace nlohmann::literals;
 
+
+message_t::timepoint_t timepoint(double now)
+{
+    auto ddur = std::chrono::duration<double>(now);
+    auto tdur = std::chrono::duration_cast<message_t::timepoint_t::duration>(ddur);
+    return message_t::timepoint_t(tdur);
+}
+
+
+double timepoint(const message_t::timepoint_t& now)
+{
+    auto ddur = std::chrono::duration<double>(now.time_since_epoch());
+    return ddur.count();
+}
+
+
+namespace zipper {
+void to_json(cfg_t& j, const message_t& msg) {
+    j = cfg_t{{"pay",msg.payload},
+              {"ord",msg.ordering},
+              {"id", msg.identity},
+              {"t", timepoint(msg.debut)}};
+}
+void to_json(cfg_t& jarr, const std::vector<message_t>& msgs) {
+    for (const message_t& msg : msgs) {
+        cfg_t j = msg;
+        jarr.push_back(j);
+    }
+}
+
+void from_json(const cfg_t& j, message_t& msg) {
+    j.at("pay").get_to(msg.payload);
+    j.at("ord").get_to(msg.ordering);
+    j.at("id").get_to(msg.identity);
+    double t = 0;
+    j.at("t").get_to(t);
+    msg.debut = timepoint(t);
+}
+void from_json(const cfg_t& jarr, std::vector<message_t>& msgs) {
+    for (const auto& j : jarr) {
+        auto msg = j.get<message_t>();
+        msgs.push_back(msg);
+    }
+}
+}
 
 std::ostream& operator<<(std::ostream& o, const message_t& m)
 {
@@ -66,19 +109,6 @@ const double tick_period = 1e-6*sim_time_second;
 
 // 3. The zipper "debut" and "now" represent "real" (system or here
 // sim) time and is represented by std::chrono timepoint. 
-
-message_t::timepoint_t timepoint(double now)
-{
-    auto ddur = std::chrono::duration<double>(now);
-    auto tdur = std::chrono::duration_cast<message_t::timepoint_t::duration>(ddur);
-    return message_t::timepoint_t(tdur);
-}
-
-double timepoint(const message_t::timepoint_t& now)
-{
-    auto ddur = std::chrono::duration<double>(now.time_since_epoch());
-    return ddur.count();
-}
 
 
 
@@ -279,19 +309,6 @@ struct node_t {
     // Vector of input and output ports.
     ports_t iports, oports;
 
-    // Keep stats about times between message creation
-    simzip::Stats inited{false};
-
-    // Keep stats about messages just received in to a node.
-    simzip::Stats recved{false};
-
-    // Keep stats about messages just prior to sending out node.
-    simzip::Stats sended{false};
-
-    // Keep stats about time to send out a message
-    simzip::Stats doneed{false};
-
-    size_t ident{0};
 
     // Owning ports
     node_t(sim_t& sim, rnd_t& rnd, const cfg_t& cfg, bool samples=true)
@@ -300,18 +317,14 @@ struct node_t {
         , cfg(cfg)
         , iports(make_ports(sim, cfg, "ibox"))
         , oports(make_ports(sim, cfg, "obox"))
-        , inited{samples}
-        , recved{samples}
-        , sended{samples}
-        , doneed{samples}
     {
         if (iports.empty() and oports.empty()) {
             throw std::invalid_argument("no ports in node:" + cfg.dump());
         }
-        ident = cfg.value("/data/ident"_json_pointer, 0);
+        _config();
     }
 
-    // Usin others ports
+    // Using other's ports
     node_t(sim_t& sim, rnd_t& rnd, const cfg_t& cfg,
            ports_t iports, ports_t oports)
         : sim(sim)
@@ -319,90 +332,101 @@ struct node_t {
         , cfg(cfg)
         , iports(iports), oports(oports)
     {
-        ident = cfg.value("/data/ident"_json_pointer, 0);
+        _config();
     }
             
-
-    // Call to initialize a new message 
-    void init(message_t& m)
+    size_t ident{0};
+    double recv_timeout{0}, send_timeout{0};
+    void _config()
     {
-        const double now = sim.now();        
+        ident = cfg.value("/data/ident"_json_pointer, 0);
+        recv_timeout = cfg.value("/data/recv_timeout"_json_pointer, 0);
+        send_timeout = cfg.value("/data/send_timeout"_json_pointer, 0);
+    }
 
-        inited(now);
-        m.debut = timepoint(now);
 
-        if (ident) {
-            m.identity = ident;
+    // Freshen the debut time.
+    void redebut(message_t& msg)
+    {
+        msg.debut = timepoint(sim.now());
+    }
+    
+
+    std::vector<message_t> msgs_creat;
+    // Create a new message.
+    message_t creat()
+    {
+        const double now = sim.now();
+        const message_t::ordering_t ordering = now / tick_period;
+        message_t msg(now, ordering, ident, timepoint(now));
+        msgs_creat.push_back(msg);
+        return msg;
+    }
+
+    // Receive a message.  bool is false if timeout occured and the
+    // msg is bogus.
+    message_event_t recv_message{sim.timeout<message_t>(0)};
+    bool recv_needed{true};
+    std::vector<message_t> msgs_recv;
+    event_t recv(message_t& msg)
+    {
+        if (recv_needed) {
+            recv_message = iports[0]->pop();
+            recv_needed = false;
         }
-    }
 
-    // Call after a co_await on pop.  This will set message debut time
-    // to simulation now() after storing the time between ordering and
-    // the current simulation now time giving total latency.
-    void recv(message_t& m)
-    {
-        const double then = m.ordering * tick_period;
-        const double now = sim.now();        
-        recved(now-then);
-        m.debut = timepoint(now);
-    }
-
-    // Call just before a co_await on push.  This will reset message
-    // debut time to simulation now() after storing how much
-    // simulation time has passed giving relative latency.
-    void send(message_t& m)
-    {
-        const double then = timepoint(m.debut);
-        const double now = sim.now();        
-        sended(now-then);
-        m.debut = timepoint(now);
-        
-        if (ident) {
-            m.identity = ident;
+        message_t dummy_msg{0, 0, 0, timepoint(0)};
+        if (recv_timeout > 0) {
+            std::vector<message_event_t> ves = {
+                recv_message,
+                sim.timeout<message_t>(recv_timeout, dummy_msg)
+            };
+            msg = co_await simzip::any_of<message_t>(sim, ves);
+            if (recv_message.triggered()) {
+                recv_needed = true;
+                redebut(msg);
+                msgs_recv.push_back(msg);
+                co_return;
+            }
+            co_await sim.timeout(0);
         }
+
+        msg = co_await iports[0]->pop();
+        redebut(msg);
+        msgs_recv.push_back(msg);
+        co_await sim.timeout(0);
     }
 
-    // Call after message is sent
-    void done(message_t& m)
+    /// Send a message
+    std::vector<message_t> msgs_send, msgs_send_timeout;
+    event_t send(message_t msg)
     {
-        const double then = timepoint(m.debut);
-        const double now = sim.now();        
-        doneed(now-then);
+        redebut(msg);
+        auto sent = oports[0]->push(msg);
+        if (send_timeout > 0) {
+            co_await (sent | sim.timeout(send_timeout));
+            if (sent.triggered()) {
+                msgs_send.push_back(msg);
+                co_return;
+            }
+            else {
+                msgs_send_timeout.push_back(msg);
+                sent.abort();
+                co_return;
+            }
+        }
+        co_await oports[0]->push(msg);
+        msgs_send.push_back(msg);
     }
+
 
     // Dump self as cfg obj
     cfg_t stats() const
     {
-        auto ret = cfg_t{
-            {"In",   inited.S0},
-            {"Imu",  inited.mean()},
-            {"Irms", inited.rms()},
-            {"Istr", inited.dump()},
-            {"Rn",   recved.S0},
-            {"Rmu",  recved.mean()},
-            {"Rrms", recved.rms()},
-            {"Rstr", recved.dump()},
-            {"Sn",   sended.S0},
-            {"Smu",  sended.mean()},
-            {"Srms", sended.rms()},
-            {"Sstr", sended.dump()},
-            {"Dn",   doneed.S0},
-            {"Dmu",  doneed.mean()},
-            {"Drms", doneed.rms()},
-            {"Dstr", doneed.dump()},
-        };
-        if (inited.sample) {
-            ret["Isamples"] = inited.samples;
-        }
-        if (recved.sample) {
-            ret["Rsamples"] = recved.samples;
-        }
-        if (sended.sample) {
-            ret["Ssamples"] = sended.samples;
-        }
-        if (doneed.sample) {
-            ret["Dsamples"] = doneed.samples;
-        }
+        cfg_t ret;
+        ret["recv"] = cfg_t(msgs_recv);
+        ret["send"] = cfg_t(msgs_send);
+        ret["send_timeout"] = cfg_t(msgs_send_timeout);
         return ret;
     }
 
@@ -425,23 +449,9 @@ event_t source(node_t& ctx)
     auto& del = ctx.rnd(ctx.cfg["/data/delay"_json_pointer]);
 
     while (true) {
-
-        const double now = sim.now();        
-        const message_t::ordering_t ordering = now / tick_period;
-            
-        message_t msg{{}, ordering, 0, timepoint(now)};
-        ctx.init(msg);
-
-        /// we are source, recv times are meaningless
-        // ctx.recv(msg);
-
-        // Now spend some "time" making the message
-        const double delay = del();
-        co_await sim.timeout(delay);
-
+        auto msg = ctx.creat();
+        co_await sim.timeout(del());
         ctx.send(msg);
-        co_await ctx.oports[0]->push(msg);
-        ctx.done(msg);
     }
 }
 
@@ -451,82 +461,25 @@ event_t source(node_t& ctx)
 //  /data/count :: return number of messages per burst
 event_t burst(node_t& ctx)
 {
-    // std::cerr << sim << "source: " << ctx.cfg << "\n";
     auto& delay = ctx.rnd(ctx.cfg["/data/delay"_json_pointer]);
     auto& count = ctx.rnd(ctx.cfg["/data/count"_json_pointer]);
 
-    // std::cerr << sim << "source: " << delay << "\n";
-
     while (true) {
-
-        const double now = ctx.sim.now();
-        const message_t::ordering_t ordering = now / tick_period;
-            
-        message_t msg{{}, ordering, 0, timepoint(now)};
-
-        /// we are source, recv times are meaningless
-        // ctx.recv(msg);
-
-        // Now spend some "time" making the message
+        auto msg = ctx.creat();
         co_await ctx.sim.timeout(delay());
-
-        ctx.send(msg);
         for (int num = count(); num > 0; --num) {
-            co_await ctx.oports[0]->push(msg);
+            ctx.send(msg);
         }
-        ctx.done(msg);
     }
 }
     
-// A coherent pseudo-source.  Each received messages is sent 
-// number of times.  Each sent message is made unique with one
-// identity in a configured sequence "streams".
-// 
-// The number of consecutive streams to which messages are sent is
-// determined by a draw of the "span" rando and the first stream is
-// given by a draw of the "start" rando.
-event_t coherent(node_t& ctx)
-{
-    auto& rstart = ctx.rnd(ctx.cfg["/data/start"_json_pointer]);
-    auto& rspan = ctx.rnd(ctx.cfg["/data/span"_json_pointer]);
-
-    const std::vector<size_t> streams = ctx.cfg["/data/streams"_json_pointer];
-    const size_t nstreams = streams.size();
-    if (nstreams != ctx.oports.size()) {
-        throw std::invalid_argument("stream and port count do not match");
-    }
-
-    while (true) {
-        auto msg = co_await ctx.iports[0]->pop();
-        ctx.recv(msg);
-
-        // half-protect against broken user input
-        size_t beg = std::min((size_t)rstart(), nstreams-1);
-        size_t end = std::min(beg+(size_t)rspan(), nstreams);
-        
-        // std::cerr << "coher:" << ctx.cfg["name"] << " recv:"
-        //           << " stream=" << msg.identity
-        //           << " order=" << msg.ordering
-        //           << " span:["<<beg<<","<<end<<"]"
-        //           << "\n";
-
-        while (beg < end) {
-            auto copy = msg;
-            ctx.send(copy);
-            copy.identity = streams[beg];
-            co_await ctx.oports[beg]->push(copy);
-            ++beg;
-        }        
-        ctx.done(msg);
-    }
-}
 
 // A sink with a single input port
 event_t sink(node_t& ctx)
 {
     while (true) {
-        auto msg = co_await ctx.iports[0]->pop();
-        ctx.recv(msg);
+        message_t msg;
+        co_await ctx.recv(msg);
     }
 }
 
@@ -537,14 +490,14 @@ event_t transfer(node_t& ctx)
 {
     // std::cerr << "TRANSFER: " << ctx.cfg << "\n";
     auto rname = ctx.cfg.value("/data/delay"_json_pointer,"random:zeros");
-
     auto& del = ctx.rnd(rname);
 
     while (true) {
 
-        auto msg = (co_await ctx.iports[0]->pop());
-        ctx.recv(msg);
-
+        message_t msg;
+        co_await ctx.recv(msg);
+        if (! msg.payload) continue;
+        
         // simulate transmission delay
         const double delay = del();
         if (delay > 0) {
@@ -552,8 +505,6 @@ event_t transfer(node_t& ctx)
         }
 
         ctx.send(msg);
-        co_await ctx.oports[0]->push(msg);
-        ctx.done(msg);
     }
 }
 
@@ -568,62 +519,16 @@ event_t zipit(node_t& ctx)
     merge_t::duration_t max_latency = timepoint(maxlat).time_since_epoch();
     merge_t zip(cardinality, max_latency);
 
-    bool next_needed = true;
-    message_event_t next_message = ctx.sim.timeout<message_t>(0);
-
     while (true) {
-        message_t msg, dummy_msg{{-1}};
-
-        if (next_needed) {
-            next_message = ctx.iports[0]->pop();
-            next_needed = false;
-        }
-        // at this point we do not know how long it takes for message
-        // to be received.  If we abserve max latency we can't wait
-        // too long for the message
-        if (maxlat > 0.0) {
-            std::vector<message_event_t> ves = {
-                next_message,
-                ctx.sim.timeout<message_t>(0.01*maxlat, dummy_msg)
-            };
-            msg = co_await simzip::any_of(ctx.sim, ves);
-        }
-        else {
-            msg = co_await next_message;
-        }
-
-        if (msg.payload.a < 0) { 
-            // We got the dummy message due to timeout.
-            // std::cerr << ctx.sim << " timeout\n";
-        }
-        else {
-            // Will got real message, will need fresh one.
-            next_needed = true; 
-            ctx.recv(msg);
-            bool ok = zip.feed(msg);
-            if (!ok) {
+        message_t msg;
+        co_await ctx.recv(msg);
+        
+        if (msg.payload) {
+            bool ack = zip.feed(msg);
+            if (!ack) {
                 std::cerr << ctx.sim << " tardy: " << msg << "\n";
             }
-
-            std::string status = ok ? " ack" : " rej";
-            // std::cerr << "zipit="<< msg.identity << " to "<< ctx.cfg["name"]
-            //           << status
-            //           << " ordering=" << msg.ordering
-            //           << " debut=" << timepoint(msg.debut)
-            //           << " origin=" << zip.get_origin()
-            //           << " size=" << zip.size()
-            //           << " complete=" << zip.complete() << "\n";
-            // std::cerr << "zipit:" << ctx.cfg["name"] << " recv:"
-            //           << ok
-            //           << " stream=" << msg.identity
-            //           << " order=" << msg.ordering
-            //           << " size=" << zip.size()   << "\n";
         }
-
-        // std::cerr << "zipit="<< msg.identity << " to "<< ctx.cfg["name"]
-        //           << " ordering=" << msg.ordering
-        //           << " origin=" << zip.get_origin()
-        //           << " size=" << zip.size() << " complete=" << zip.complete() << "\n";
 
         std::vector<message_t> got;
         if (maxlat > 0) {
@@ -634,17 +539,6 @@ event_t zipit(node_t& ctx)
         }
         for (auto one : got) {
             ctx.send(one);
-
-            // std::cerr << "zipit:" << ctx.cfg["name"] << " send:"
-            //           << " stream=" << msg.identity
-            //           << " order=" << msg.ordering
-            //           << " size=" << zip.size() 
-            //           << "\n";
-            // const auto t1 = ctx.sim.now();
-            co_await ctx.oports[0]->push(one);
-            // const auto t2 = ctx.sim.now();
-            // std::cerr << "zipit: " << t2-t1 << " send delay\n";
-            ctx.done(one);
         }
 
         ctx.cfg["/data/zipsize"_json_pointer] = zip.size();
@@ -719,7 +613,7 @@ struct node_store_t {
 struct node_types_t {
     std::unordered_map<std::string, node_function> types = {    
         {"source",source}, {"burst",burst}, {"sink",sink},
-        {"transfer",transfer}, {"zipit",zipit}, {"coherent", coherent}
+        {"transfer",transfer}, {"zipit",zipit},
     };
     node_function operator()(const std::string& type) const {
         auto it = types.find(type);
@@ -796,8 +690,7 @@ struct context_t
             auto key = make_key(node);
             const auto& nctx = node_store.get(key);
             auto config = nctx.cfg;
-            auto stats = nctx.stats();
-            config["data"].update(stats, true);
+            config["msgs"] = nctx.stats();
             nodes.push_back(config);
         }
 
@@ -806,8 +699,7 @@ struct context_t
             auto ekey = make_edge_key(edge);
             auto& nctx = node_store.get(ekey);
             auto config = nctx.cfg;
-            auto stats = nctx.stats();
-            config["data"].update(stats, true);
+            config["msgs"] = nctx.stats();
             edges.push_back(config);
         }
 
@@ -817,25 +709,6 @@ struct context_t
         return ret;
     }
 
-    std::string summary() const
-    {
-        std::stringstream ss;
-        for (auto node : cfg["nodes"]) {
-            if (is_service(node)) {
-                continue;
-            } 
-
-            auto key = make_key(node);
-            const auto& nctx = node_store.get(key);
-            // auto cfg = nctx.cfg;
-            auto cfg = nctx.stats();
-            ss << key << "\n"
-               << "\trecved: " << cfg["Rstr"] << "\n"
-               << "\tsended: " << cfg["Sstr"] << "\n"
-               << "\tdoneed: " << cfg["Dstr"] << "\n";
-        }
-        return ss.str();
-    }
 };
 
 
@@ -858,8 +731,6 @@ int main(int argc, char* argv[])
 
     std::ofstream out(ofname);
     out << std::setw(4) << ctx.state() << std::endl;
-
-    std::cerr << ctx.summary() << std::endl;
 
     return 0;
 }
