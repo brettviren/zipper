@@ -40,7 +40,7 @@ void fill_some(merge_t& mq)
     assert(ok);
 }
 
-void five_then_delay(int delay, int want, int latency)
+void five_then_delay(size_t delay, size_t want, size_t latency)
 {
     merge_t mq(3, std::chrono::microseconds(latency));
 
@@ -62,7 +62,7 @@ void five_then_delay(int delay, int want, int latency)
     else {
         std::cerr << "added c1\n";
     }
-    assert(ok == latency > delay);
+    assert(ok == (latency > delay));
     
     mq.drain_prompt(std::back_inserter(got), us(delay+2));
     std::cerr << "got: " << got.size()

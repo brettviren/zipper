@@ -8,3 +8,10 @@ test_lossy
 test_cardinality
 .lock-waf*
 build
+json
+simcpp20
+wire-cell-python
+.direnv
+.envrc
+cut.*
+*.json

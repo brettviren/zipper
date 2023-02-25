@@ -64,7 +64,7 @@ int main()
     merge_t zm(nstreams);
 
     auto t0 = std::chrono::steady_clock::now();
-    std::chrono::nanoseconds zmdt;
+    std::chrono::nanoseconds zmdt {0};
     for (int count = 0 ; count < nsend; ++count) {
 
         // find next "active" stream
